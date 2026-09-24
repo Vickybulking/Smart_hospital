@@ -1,0 +1,21 @@
+# Dependencies
+*.egg-info/
+*.egg/
+.env
+__pycache__/
+*.pyc
+*.pyo
+.Python
+
+# Environment variables
+.env*
+!.env.example
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store

@@ -1,0 +1,275 @@
+# AWS SAM Template for Smart Hospital Management System
+
+Transform: AWS::Serverless-2016-10-31
+
+Description: Smart Hospital Management System Infrastructure
+
+Globals:
+  Function:
+    Timeout: 30
+    Runtime: python3.9
+    Handler: src/lambda_handler.handler
+    Architectures:
+      - x86_64
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: development
+
+Conditions:
+  IsProduction: !Equals [!Ref EnvironmentName, production]
+
+Resources:
+  # Cognito User Pool
+  CognitoUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub ${EnvironmentName}-hospital-user-pool
+      AutoVerifiedAttributes: ['email']
+      UsernameAttributes: ['email']
+      MfaConfiguration: OPTIONAL
+      Schema:
+        - Name: email
+          AttributeDataType: String
+          Required: true
+        - Name: name
+          AttributeDataType: String
+          Required: true
+
+  # Cognito Client
+  CognitoUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: !Ref CognitoUserPool
+      ClientName: !Sub ${EnvironmentName}-hospital-client
+      ExplicitAuthFlows:
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+        - ALLOW_USER_PASSWORD_AUTH
+      SupportedIdentityProviders:
+        - COGNITO
+
+  PatientGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: patient
+      UserPoolId: !Ref CognitoUserPool
+  DoctorGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: doctor
+      UserPoolId: !Ref CognitoUserPool
+  AdminGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: admin
+      UserPoolId: !Ref CognitoUserPool
+
+  # DynamoDB Tables
+  PatientsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub ${EnvironmentName}-patients
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: patientId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: patientId
+          KeyType: HASH
+
+  DoctorsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub ${EnvironmentName}-doctors
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: doctorId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: doctorId
+          KeyType: HASH
+
+  AppointmentsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub ${EnvironmentName}-appointments
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: appointmentId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: appointmentId
+          KeyType: HASH
+
+  AppointmentSlotsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub ${EnvironmentName}-appointment-slots
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: slotKey
+          AttributeType: S
+      KeySchema:
+        - AttributeName: slotKey
+          KeyType: HASH
+
+  MedicalRecordsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub ${EnvironmentName}-medical-records
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: recordId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: recordId
+          KeyType: HASH
+
+  # API Gateway
+  HospitalApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: !Ref EnvironmentName
+      Auth:
+        DefaultAuthorizationType: COGNITO_USER_POOLS
+        CognitoUserPools:
+          - !Ref CognitoUserPool
+
+  # S3 Bucket for documents
+  DocumentsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${EnvironmentName}-hospital-documents
+      ServerSideEncryptionConfiguration:
+        Rule:
+          ApplyServerSideEncryptionByDefault:
+            SSEAlgorithm: AES256
+
+  # SNS Topic for notifications
+  NotificationsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub ${EnvironmentName}-hospital-notifications
+
+  # IAM Role for Lambda functions
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${EnvironmentName}-lambda-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: lambda-basic
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: arn:aws:logs:*:*:*
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource:
+                  - !GetAtt PatientsTable.Arn
+                  - !GetAtt DoctorsTable.Arn
+                  - !GetAtt AppointmentsTable.Arn
+                  - !GetAtt MedicalRecordsTable.Arn
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource:
+                  - !Sub arn:aws:s3:::${DocumentsBucket}/*
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref NotificationsTopic
+
+  CreateAppointmentFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../backend/functions/appointments/create/
+      Handler: handler.handler
+      Environment:
+        Variables:
+          APPOINTMENTS_TABLE: !Ref AppointmentsTable
+          APPOINTMENT_SLOTS_TABLE: !Ref AppointmentSlotsTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AppointmentsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AppointmentSlotsTable
+      Events:
+        CreateAppointment:
+          Type: Api
+          Properties:
+            RestApiId: !Ref HospitalApi
+            Path: /appointments
+            Method: post
+
+  ListAppointmentsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../backend/functions/appointments/list/
+      Handler: handler.handler
+      Environment:
+        Variables:
+          APPOINTMENTS_TABLE: !Ref AppointmentsTable
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref AppointmentsTable
+      Events:
+        ListAppointments:
+          Type: Api
+          Properties:
+            RestApiId: !Ref HospitalApi
+            Path: /appointments
+            Method: get
+
+  ApproveAppointmentFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../backend/functions/appointments/approve/
+      Handler: handler.handler
+      Environment:
+        Variables:
+          APPOINTMENTS_TABLE: !Ref AppointmentsTable
+          NOTIFICATIONS_TOPIC_ARN: !Ref NotificationsTopic
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AppointmentsTable
+        - SNSPublishMessagePolicy:
+            TopicName: !GetAtt NotificationsTopic.TopicName
+      Events:
+        ApproveAppointment:
+          Type: Api
+          Properties:
+            RestApiId: !Ref HospitalApi
+            Path: /appointments/{appointmentId}/approval
+            Method: put
+Outputs:
+  ApiUrl:
+    Description: API Gateway endpoint URL
+    Value: !Sub https://${HospitalApi}.execute-api.${AWS::Region}.amazonaws.com/${EnvironmentName}/
+  DocumentsBucket:
+    Description: S3 bucket for medical documents
+    Value: !Ref DocumentsBucket
+  NotificationsTopicArn:
+    Description: SNS topic ARN for notifications
+    Value: !Ref NotificationsTopic

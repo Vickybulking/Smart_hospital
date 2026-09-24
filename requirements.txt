@@ -1,0 +1,4 @@
+# Core dependencies for Smart Hospital Management System
+# Note: json and uuid are Python standard library modules — do NOT add them here
+boto3>=1.30.0
+aws-lambda-powertools>=2.30.0
