@@ -127,6 +127,18 @@ Resources:
         - AttributeName: recordId
           KeyType: HASH
 
+  DocumentsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub ${EnvironmentName}-documents
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: documentId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: documentId
+          KeyType: HASH
+
   # API Gateway
   HospitalApi:
     Type: AWS::Serverless::Api
@@ -189,11 +201,13 @@ Resources:
                   - !GetAtt DoctorsTable.Arn
                   - !GetAtt AppointmentsTable.Arn
                   - !GetAtt MedicalRecordsTable.Arn
+                  - !GetAtt DocumentsTable.Arn
               - Effect: Allow
                 Action:
                   - s3:GetObject
                   - s3:PutObject
                   - s3:DeleteObject
+                  - s3:GeneratePresignedUrl
                 Resource:
                   - !Sub arn:aws:s3:::${DocumentsBucket}/*
               - Effect: Allow
@@ -263,6 +277,454 @@ Resources:
             RestApiId: !Ref HospitalApi
             Path: /appointments/{appointmentId}/approval
             Method: put
+
+  # ── Appointments ──────────────────────────────────────────────────────────
+  GetAppointmentFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../backend/functions/appointments/get/
+      Handler: handler.handler
+      Environment:
+        Variables:
+          APPOINTMENTS_TABLE: !Ref AppointmentsTable
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref AppointmentsTable
+      Events:
+        GetAppointment:
+          Type: Api
+          Properties:
+            RestApiId: !Ref HospitalApi
+            Path: /appointments/{appointmentId}
+            Method: get
+
+  CancelAppointmentFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../backend/functions/appointments/cancel/
+      Handler: handler.handler
+      Environment:
+        Variables:
+          APPOINTMENTS_TABLE: !Ref AppointmentsTable
+          NOTIFICATIONS_TOPIC_ARN: !Ref NotificationsTopic
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AppointmentsTable
+        - SNSPublishMessagePolicy:
+            TopicName: !GetAtt NotificationsTopic.TopicName
+      Events:
+        CancelAppointment:
+          Type: Api
+          Properties:
+            RestApiId: !Ref HospitalApi
+            Path: /appointments/{appointmentId}
+            Method: delete
+
+  RescheduleAppointmentFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../backend/functions/appointments/reschedule/
+      Handler: handler.handler
+      Environment:
+        Variables:
+          APPOINTMENTS_TABLE: !Ref AppointmentsTable
+          APPOINTMENT_SLOTS_TABLE: !Ref AppointmentSlotsTable
+          NOTIFICATIONS_TOPIC_ARN: !Ref NotificationsTopic
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AppointmentsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AppointmentSlotsTable
+        - SNSPublishMessagePolicy:
+            TopicName: !GetAtt NotificationsTopic.TopicName
+      Events:
+        RescheduleAppointment:
+          Type: Api
+          Properties:
+            RestApiId: !Ref HospitalApi
+            Path: /appointments/{appointmentId}/reschedule
+            Method: put
+
+  # ── Patients ───────────────────────────────────────────────────────────────
+  CreatePatientFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../backend/functions/patients/create/
+      Handler: handler.handler
+      Environment:
+        Variables:
+          PATIENTS_TABLE: !Ref PatientsTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref PatientsTable
+      Events:
+        CreatePatient:
+          Type: Api
+          Properties:
+            RestApiId: !Ref HospitalApi
+            Path: /patients
+            Method: post
+
+  GetPatientFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../backend/functions/patients/get/
+      Handler: handler.handler
+      Environment:
+        Variables:
+          PATIENTS_TABLE: !Ref PatientsTable
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref PatientsTable
+      Events:
+        GetPatient:
+          Type: Api
+          Properties:
+            RestApiId: !Ref HospitalApi
+            Path: /patients/{patientId}
+            Method: get
+
+  ListPatientsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../backend/functions/patients/list/
+      Handler: handler.handler
+      Environment:
+        Variables:
+          PATIENTS_TABLE: !Ref PatientsTable
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref PatientsTable
+      Events:
+        ListPatients:
+          Type: Api
+          Properties:
+            RestApiId: !Ref HospitalApi
+            Path: /patients
+            Method: get
+
+  # ── Doctors ────────────────────────────────────────────────────────────────
+  CreateDoctorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../backend/functions/doctors/create/
+      Handler: handler.handler
+      Environment:
+        Variables:
+          DOCTORS_TABLE: !Ref DoctorsTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref DoctorsTable
+      Events:
+        CreateDoctor:
+          Type: Api
+          Properties:
+            RestApiId: !Ref HospitalApi
+            Path: /doctors
+            Method: post
+
+  GetDoctorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../backend/functions/doctors/get/
+      Handler: handler.handler
+      Environment:
+        Variables:
+          DOCTORS_TABLE: !Ref DoctorsTable
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref DoctorsTable
+      Events:
+        GetDoctor:
+          Type: Api
+          Properties:
+            RestApiId: !Ref HospitalApi
+            Path: /doctors/{doctorId}
+            Method: get
+
+  ListDoctorsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../backend/functions/doctors/list/
+      Handler: handler.handler
+      Environment:
+        Variables:
+          DOCTORS_TABLE: !Ref DoctorsTable
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref DoctorsTable
+      Events:
+        ListDoctors:
+          Type: Api
+          Properties:
+            RestApiId: !Ref HospitalApi
+            Path: /doctors
+            Method: get
+
+  # ── Medical Records ────────────────────────────────────────────────────────
+  CreateMedicalRecordFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../backend/functions/medical-records/create/
+      Handler: handler.handler
+      Environment:
+        Variables:
+          MEDICAL_RECORDS_TABLE: !Ref MedicalRecordsTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref MedicalRecordsTable
+      Events:
+        CreateMedicalRecord:
+          Type: Api
+          Properties:
+            RestApiId: !Ref HospitalApi
+            Path: /medical-records
+            Method: post
+
+  GetMedicalRecordFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../backend/functions/medical-records/get/
+      Handler: handler.handler
+      Environment:
+        Variables:
+          MEDICAL_RECORDS_TABLE: !Ref MedicalRecordsTable
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref MedicalRecordsTable
+      Events:
+        GetMedicalRecord:
+          Type: Api
+          Properties:
+            RestApiId: !Ref HospitalApi
+            Path: /medical-records/{recordId}
+            Method: get
+
+  ListMedicalRecordsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../backend/functions/medical-records/list/
+      Handler: handler.handler
+      Environment:
+        Variables:
+          MEDICAL_RECORDS_TABLE: !Ref MedicalRecordsTable
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref MedicalRecordsTable
+      Events:
+        ListMedicalRecords:
+          Type: Api
+          Properties:
+            RestApiId: !Ref HospitalApi
+            Path: /medical-records
+            Method: get
+
+  # ── Documents ──────────────────────────────────────────────────────────────
+  GenerateUploadUrlFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../backend/functions/documents/generate-upload-url/
+      Handler: handler.handler
+      Environment:
+        Variables:
+          DOCUMENTS_BUCKET: !Ref DocumentsBucket
+      Policies:
+        - S3WritePolicy:
+            BucketName: !Ref DocumentsBucket
+      Events:
+        GenerateUploadUrl:
+          Type: Api
+          Properties:
+            RestApiId: !Ref HospitalApi
+            Path: /documents/upload-url
+            Method: post
+
+  GenerateDownloadUrlFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../backend/functions/documents/generate-download-url/
+      Handler: handler.handler
+      Environment:
+        Variables:
+          DOCUMENTS_BUCKET: !Ref DocumentsBucket
+      Policies:
+        - S3ReadPolicy:
+            BucketName: !Ref DocumentsBucket
+      Events:
+        GenerateDownloadUrl:
+          Type: Api
+          Properties:
+            RestApiId: !Ref HospitalApi
+            Path: /documents/download-url
+            Method: get
+
+  SaveDocumentMetadataFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../backend/functions/documents/save-metadata/
+      Handler: handler.handler
+      Environment:
+        Variables:
+          DOCUMENTS_TABLE: !Ref DocumentsTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref DocumentsTable
+      Events:
+        SaveDocumentMetadata:
+          Type: Api
+          Properties:
+            RestApiId: !Ref HospitalApi
+            Path: /documents/metadata
+            Method: post
+
+  DeleteDocumentFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../backend/functions/documents/delete/
+      Handler: handler.handler
+      Environment:
+        Variables:
+          DOCUMENTS_BUCKET: !Ref DocumentsBucket
+          DOCUMENTS_TABLE: !Ref DocumentsTable
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !Ref DocumentsBucket
+        - DynamoDBCrudPolicy:
+            TableName: !Ref DocumentsTable
+      Events:
+        DeleteDocument:
+          Type: Api
+          Properties:
+            RestApiId: !Ref HospitalApi
+            Path: /documents/{documentId}
+            Method: delete
+
+  # ── Notifications ──────────────────────────────────────────────────────────
+  SendNotificationFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../backend/functions/notifications/
+      Handler: handler.handler
+      Environment:
+        Variables:
+          NOTIFICATIONS_TOPIC_ARN: !Ref NotificationsTopic
+      Policies:
+        - SNSPublishMessagePolicy:
+            TopicName: !GetAtt NotificationsTopic.TopicName
+      Events:
+        SendNotification:
+          Type: Api
+          Properties:
+            RestApiId: !Ref HospitalApi
+            Path: /notifications
+            Method: post
+
+  # ── AI Summary ─────────────────────────────────────────────────────────────
+  AiSummaryFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../backend/functions/ai-summary/
+      Handler: handler.handler
+      Timeout: 60
+      Environment:
+        Variables:
+          DOCUMENTS_TABLE: !Ref DocumentsTable
+          BEDROCK_MODEL_ID: anthropic.claude-3-haiku-20240307-v1:0
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref DocumentsTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+              Resource:
+                - arn:aws:bedrock:*::foundation-model/anthropic.claude-3-haiku-20240307-v1:0
+                - arn:aws:bedrock:*::foundation-model/amazon.titan-text-express-v1
+      Events:
+        AiSummary:
+          Type: Api
+          Properties:
+            RestApiId: !Ref HospitalApi
+            Path: /ai/summary
+            Method: post
+
+  # ── Missing CRUD Endpoints ─────────────────────────────────────────────────
+  UpdatePatientFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../backend/functions/patients/update/
+      Handler: handler.handler
+      Environment:
+        Variables:
+          PATIENTS_TABLE: !Ref PatientsTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref PatientsTable
+      Events:
+        UpdatePatient:
+          Type: Api
+          Properties:
+            RestApiId: !Ref HospitalApi
+            Path: /patients/{patientId}
+            Method: put
+
+  UpdateDoctorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../backend/functions/doctors/update/
+      Handler: handler.handler
+      Environment:
+        Variables:
+          DOCTORS_TABLE: !Ref DoctorsTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref DoctorsTable
+      Events:
+        UpdateDoctor:
+          Type: Api
+          Properties:
+            RestApiId: !Ref HospitalApi
+            Path: /doctors/{doctorId}
+            Method: put
+
+  GetDoctorAvailabilityFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../backend/functions/doctors/availability/get/
+      Handler: handler.handler
+      Environment:
+        Variables:
+          DOCTORS_TABLE: !Ref DoctorsTable
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref DoctorsTable
+      Events:
+        GetDoctorAvailability:
+          Type: Api
+          Properties:
+            RestApiId: !Ref HospitalApi
+            Path: /doctors/{doctorId}/availability
+            Method: get
+
+  SetDoctorAvailabilityFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../backend/functions/doctors/availability/set/
+      Handler: handler.handler
+      Environment:
+        Variables:
+          DOCTORS_TABLE: !Ref DoctorsTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref DoctorsTable
+      Events:
+        SetDoctorAvailability:
+          Type: Api
+          Properties:
+            RestApiId: !Ref HospitalApi
+            Path: /doctors/{doctorId}/availability
+            Method: put
+
 Outputs:
   ApiUrl:
     Description: API Gateway endpoint URL
@@ -273,3 +735,9 @@ Outputs:
   NotificationsTopicArn:
     Description: SNS topic ARN for notifications
     Value: !Ref NotificationsTopic
+  CognitoUserPoolId:
+    Description: Cognito User Pool ID
+    Value: !Ref CognitoUserPool
+  CognitoUserPoolClientId:
+    Description: Cognito User Pool Client ID
+    Value: !Ref CognitoUserPoolClient

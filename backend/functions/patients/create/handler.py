@@ -87,5 +87,3 @@ def handler(event, context):
             'headers': CORS_HEADERS,
             'body': json.dumps({'error': 'Internal server error'}),
         }
-
-}

@@ -1,33 +1,60 @@
 import json
+import os
+
 import boto3
 
+dynamodb = boto3.resource('dynamodb')
+
+CORS_HEADERS = {
+    'Content-Type': 'application/json',
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Headers': 'Content-Type,Authorization',
+    'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS',
+}
+
+
 def handler(event, context):
-    """Get a medical record by ID"""
+    """Fetch a single medical record by recordId from DynamoDB."""
     try:
-        record_id = event.get('pathParameters', {}).get('recordId')
+        record_id = (event.get('pathParameters') or {}).get('recordId')
         if not record_id:
             return {
                 'statusCode': 400,
-                'body': json.dumps({'error': 'recordId path parameter is required'})
+                'headers': CORS_HEADERS,
+                'body': json.dumps({'error': 'recordId path parameter is required'}),
             }
-        
-        # Mock response
-        record = {
-            'recordId': record_id,
-            'patientId': '1',
-            'doctorId': '1',
-            'title': 'Patient Consultation Notes',
-            'contentUrl': 's3://bucket/path/to/record',
-            'createdAt': '2024-01-01T00:00:00Z',
-            'updatedAt': '2024-01-01T00:00:00Z'
-        }
-        
+
+        table_name = os.environ.get('MEDICAL_RECORDS_TABLE')
+        if not table_name:
+            raise EnvironmentError('MEDICAL_RECORDS_TABLE environment variable is not set')
+
+        table = dynamodb.Table(table_name)
+        response = table.get_item(Key={'recordId': record_id})
+
+        item = response.get('Item')
+        if not item:
+            return {
+                'statusCode': 404,
+                'headers': CORS_HEADERS,
+                'body': json.dumps({'error': f'Medical record {record_id} not found'}),
+            }
+
         return {
             'statusCode': 200,
-            'body': json.dumps(record)
+            'headers': CORS_HEADERS,
+            'body': json.dumps(item),
         }
-    except Exception as e:
+
+    except EnvironmentError as e:
         return {
             'statusCode': 500,
-            'body': json.dumps({'error': str(e)})
+            'headers': CORS_HEADERS,
+            'body': json.dumps({'error': str(e)}),
+        }
+    except Exception as e:
+        print(f'Unexpected error fetching medical record {record_id}: {e}')
+        return {
+            'statusCode': 500,
+            'headers': CORS_HEADERS,
+            'body': json.dumps({'error': 'Internal server error'}),
         }

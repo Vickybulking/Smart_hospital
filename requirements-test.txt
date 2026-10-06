@@ -1,0 +1,5 @@
+# Test dependencies for Smart Hospital Management System
+pytest>=7.0.0
+pytest-mock>=3.12.0
+boto3>=1.30.0
+moto[dynamodb,s3,sns,cognitoidp]>=5.0.0
