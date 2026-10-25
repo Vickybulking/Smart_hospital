@@ -1,7 +1,11 @@
 import json
 import os
+import sys
 
 import boto3
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..', 'shared'))
+from auth import user_sub, is_group
 
 dynamodb = boto3.resource('dynamodb')
 
@@ -38,6 +42,23 @@ def handler(event, context):
                 'headers': CORS_HEADERS,
                 'body': json.dumps({'error': f'Appointment {appointment_id} not found'}),
             }
+
+        # Patients see their own appointments, doctors see appointments
+        # assigned to them, admins see everything.
+        caller = user_sub(event)
+        if not caller:
+            return {
+                'statusCode': 401,
+                'headers': CORS_HEADERS,
+                'body': json.dumps({'error': 'Authentication required'}),
+            }
+        if not is_group(event, 'admin'):
+            if item.get('patientId') != caller and item.get('doctorId') != caller:
+                return {
+                    'statusCode': 403,
+                    'headers': CORS_HEADERS,
+                    'body': json.dumps({'error': 'You are not a participant in this appointment'}),
+                }
 
         return {
             'statusCode': 200,

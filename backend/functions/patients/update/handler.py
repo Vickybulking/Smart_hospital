@@ -1,9 +1,13 @@
 import json
 import os
+import sys
 from datetime import datetime
 
 import boto3
 from botocore.exceptions import ClientError
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..', 'shared'))
+from auth import user_sub, is_group, response
 
 dynamodb = boto3.resource('dynamodb')
 
@@ -21,7 +25,16 @@ UPDATABLE_FIELDS = {'name', 'email', 'phone', 'dateOfBirth', 'address', 'bloodGr
 def handler(event, context):
     """Update an existing patient record in DynamoDB (partial update – PATCH semantics on PUT)."""
     try:
+        # Patients may only update their own profile; admins may update any.
+        caller = user_sub(event)
+        if not caller:
+            return response(401, {'error': 'Authentication required'})
         patient_id = (event.get('pathParameters') or {}).get('patientId')
+        if is_group(event, 'patient') and caller != patient_id:
+            return response(403, {'error': 'Patients may only update their own profile'})
+        if not (is_group(event, 'patient') or is_group(event, 'admin')):
+            return response(403, {'error': 'Only the patient or an admin may update this profile'})
+
         if not patient_id:
             return {
                 'statusCode': 400,

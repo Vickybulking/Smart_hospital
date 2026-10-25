@@ -1,7 +1,11 @@
 import json
 import os
+import sys
 
 import boto3
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'shared'))
+from auth import user_sub, is_group, response
 
 sns = boto3.client('sns')
 
@@ -14,8 +18,14 @@ CORS_HEADERS = {
 
 
 def handler(event, context):
-    """Publish a notification message to the SNS topic."""
+    """Publish a notification message to the SNS topic (doctor/admin only)."""
     try:
+        caller = user_sub(event)
+        if not caller:
+            return response(401, {'error': 'Authentication required'})
+        if not (is_group(event, 'doctor') or is_group(event, 'admin')):
+            return response(403, {'error': 'Only doctors and admins can send notifications'})
+
         raw_body = event.get('body') or '{}'
         body = json.loads(raw_body)
 

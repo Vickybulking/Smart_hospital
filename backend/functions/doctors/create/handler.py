@@ -1,9 +1,14 @@
 import json
 import os
 import uuid
+import sys
 from datetime import datetime
 
 import boto3
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..', 'shared'))
+
+from auth import user_sub, is_group, response
 
 dynamodb = boto3.resource('dynamodb')
 
@@ -18,12 +23,27 @@ REQUIRED_FIELDS = ['name', 'email', 'specialty']
 
 
 def handler(event, context):
-    """Create a new doctor record in DynamoDB."""
+    """Create a doctor profile.
+
+    - Doctors create their OWN profile: doctorId is forced to the caller's
+      Cognito sub so nobody can register a profile for another doctor.
+    - Admins may register a profile for any doctorId (staff provisioning).
+    """
     try:
+        caller = user_sub(event)
+        if not caller:
+            return response(401, {'error': 'Authentication required'})
+
+        if is_group(event, 'doctor'):
+            doctor_id = caller
+        elif is_group(event, 'admin'):
+            doctor_id = None  # decided below
+        else:
+            return response(403, {'error': 'Only doctors or admins can create doctor profiles'})
+
         raw_body = event.get('body') or '{}'
         body = json.loads(raw_body)
 
-        # --- Input validation ---
         errors = [f'{f} is required' for f in REQUIRED_FIELDS if not body.get(f)]
         if errors:
             return {
@@ -32,35 +52,37 @@ def handler(event, context):
                 'body': json.dumps({'errors': errors}),
             }
 
-        # --- Build doctor item ---
+        if not doctor_id:
+            doctor_id = body.get('doctorId') or str(uuid.uuid4())
+
         now = datetime.utcnow().isoformat() + 'Z'
-        doctor_id = str(uuid.uuid4())
         doctor = {
             'doctorId': doctor_id,
             'name': body['name'],
             'email': body['email'],
             'specialty': body['specialty'],
             'phone': body.get('phone', ''),
-            'availability': body.get('availability', 'Available'),
+            'qualification': body.get('qualification', ''),
+            'experience': body.get('experience', ''),
+            'bio': body.get('bio', ''),
+            'availability': {},
             'role': 'doctor',
             'createdAt': now,
             'updatedAt': now,
         }
 
-        # --- Persist to DynamoDB ---
         table_name = os.environ.get('DOCTORS_TABLE')
         if not table_name:
             raise EnvironmentError('DOCTORS_TABLE environment variable is not set')
 
-        table = dynamodb.Table(table_name)
-        table.put_item(Item=doctor)
+        dynamodb.Table(table_name).put_item(Item=doctor)
 
         return {
             'statusCode': 201,
             'headers': CORS_HEADERS,
             'body': json.dumps({
                 'doctorId': doctor_id,
-                'message': 'Doctor created successfully',
+                'message': 'Doctor profile saved successfully',
             }),
         }
 
@@ -77,7 +99,7 @@ def handler(event, context):
             'body': json.dumps({'error': 'Invalid JSON in request body'}),
         }
     except Exception as e:
-        print(f'Unexpected error creating doctor: {e}')
+        print(f'Unexpected error creating doctor profile: {e}')
         return {
             'statusCode': 500,
             'headers': CORS_HEADERS,

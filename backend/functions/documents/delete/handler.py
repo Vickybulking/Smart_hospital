@@ -1,7 +1,11 @@
 import json
 import os
+import sys
 
 import boto3
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..', 'shared'))
+from auth import user_sub, is_group, response
 
 s3 = boto3.client('s3')
 dynamodb = boto3.resource('dynamodb')
@@ -44,6 +48,13 @@ def handler(event, context):
                 'headers': CORS_HEADERS,
                 'body': json.dumps({'error': f'Document {document_id} not found'}),
             }
+
+        # Patients may only delete their own documents.
+        caller = user_sub(event)
+        if not caller:
+            return response(401, {'error': 'Authentication required'})
+        if is_group(event, 'patient') and item.get('patientId') != caller:
+            return response(403, {'error': 'Patients may only delete their own documents'})
 
         file_key = item.get('fileKey', '')
 

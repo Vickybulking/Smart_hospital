@@ -1,7 +1,11 @@
 import json
 import os
+import sys
 
 import boto3
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..', 'shared'))
+from auth import user_sub, is_group
 
 dynamodb = boto3.resource('dynamodb')
 
@@ -14,8 +18,22 @@ CORS_HEADERS = {
 
 
 def handler(event, context):
-    """List all patients from DynamoDB with optional pagination."""
+    """List all patients from DynamoDB with optional pagination (doctor/admin only)."""
     try:
+        caller = user_sub(event)
+        if not caller:
+            return {
+                'statusCode': 401,
+                'headers': CORS_HEADERS,
+                'body': json.dumps({'error': 'Authentication required'}),
+            }
+        if not (is_group(event, 'doctor') or is_group(event, 'admin')):
+            return {
+                'statusCode': 403,
+                'headers': CORS_HEADERS,
+                'body': json.dumps({'error': 'Only doctors and admins may list patients'}),
+            }
+
         table_name = os.environ.get('PATIENTS_TABLE')
         if not table_name:
             raise EnvironmentError('PATIENTS_TABLE environment variable is not set')

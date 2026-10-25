@@ -1,8 +1,11 @@
 import json
 import os
+import sys
 
 import boto3
-from boto3.dynamodb.conditions import Key
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..', 'shared'))
+from auth import user_sub, is_group
 
 dynamodb = boto3.resource('dynamodb')
 
@@ -17,6 +20,22 @@ CORS_HEADERS = {
 def handler(event, context):
     """Fetch a single patient by patientId from DynamoDB."""
     try:
+        # Patients may only fetch their own profile; doctors and admins may
+        # fetch any patient's profile.
+        caller = user_sub(event)
+        if not caller:
+            return {
+                'statusCode': 401,
+                'headers': CORS_HEADERS,
+                'body': json.dumps({'error': 'Authentication required'}),
+            }
+        if is_group(event, 'patient') and caller != (event.get('pathParameters') or {}).get('patientId'):
+            return {
+                'statusCode': 403,
+                'headers': CORS_HEADERS,
+                'body': json.dumps({'error': 'Patients may only view their own profile'}),
+            }
+
         patient_id = (event.get('pathParameters') or {}).get('patientId')
         if not patient_id:
             return {

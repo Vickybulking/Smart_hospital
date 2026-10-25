@@ -81,7 +81,10 @@ def handler(event, context):
             }),
         }
     except ClientError as e:
-        if e.response['Error']['Code'] == 'ConditionalCheckFailedException':
+        # Slot contention inside transact_write_items surfaces as
+        # TransactionCanceledException; single-item conditions raise
+        # ConditionalCheckFailedException. Both mean the slot is taken.
+        if e.response['Error']['Code'] in ('ConditionalCheckFailedException', 'TransactionCanceledException'):
             return response(409, {'error': 'That doctor slot is already booked'})
         raise
 

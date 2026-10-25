@@ -1,9 +1,13 @@
 import json
 import os
+import sys
 from datetime import datetime
 
 import boto3
 from botocore.exceptions import ClientError
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..', '..', 'shared'))
+from auth import user_sub, is_group, response
 
 dynamodb = boto3.resource('dynamodb')
 
@@ -69,6 +73,15 @@ def handler(event, context):
                 'headers': CORS_HEADERS,
                 'body': json.dumps({'error': 'doctorId path parameter is required'}),
             }
+
+        # Only the doctor themselves (or an admin) may change availability.
+        caller = user_sub(event)
+        if not caller:
+            return response(401, {'error': 'Authentication required'})
+        if is_group(event, 'doctor') and caller != doctor_id:
+            return response(403, {'error': 'Doctors may only set their own availability'})
+        if not (is_group(event, 'doctor') or is_group(event, 'admin')):
+            return response(403, {'error': 'Only the doctor or an admin may set availability'})
 
         table_name = os.environ.get('DOCTORS_TABLE')
         if not table_name:
