@@ -49,9 +49,9 @@ def handler(event, context):
         if last_key:
             scan_kwargs['ExclusiveStartKey'] = {'appointmentId': last_key}
 
-        response = table.scan(**scan_kwargs)
-        appointments = response.get('Items', [])
-        next_key = response.get('LastEvaluatedKey', {}).get('appointmentId')
+        result = table.scan(**scan_kwargs)
+        appointments = result.get('Items', [])
+        next_key = result.get('LastEvaluatedKey', {}).get('appointmentId')
 
         return {
             'statusCode': 200,

@@ -1,0 +1,266 @@
+#!/usr/bin/env python3
+"""Local development server for Carely — runs WITHOUT AWS.
+
+Serves the SAME API contract as the deployed API Gateway, but invokes the
+REAL Lambda handler code from backend/functions/* against a moto-emulated
+DynamoDB (transactions enforced). Authentication is a mocked JWT: the
+frontend's local-mode shim sends a structurally-valid token and this server
+decodes its claims the way API Gateway's Cognito authorizer would.
+
+Usage:
+    .venv/bin/python scripts/local_dev_server.py          # API on :5111
+    python3 -m http.server 8080 --directory frontend      # in another shell
+
+Requires frontend/config.js with localMode: true (see frontend/config.example.js).
+"""
+
+import base64
+import importlib.util
+import json
+import os
+import re
+import sys
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
+
+import boto3
+from moto import mock_aws
+
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, os.path.join(ROOT, 'backend', 'shared'))
+
+PORT = int(os.getenv('PORT', '5111'))
+
+TABLES = {
+    'PATIENTS_TABLE': 'local-patients',
+    'DOCTORS_TABLE': 'local-doctors',
+    'APPOINTMENTS_TABLE': 'local-appointments',
+    'APPOINTMENT_SLOTS_TABLE': 'local-slots',
+    'MEDICAL_RECORDS_TABLE': 'local-records',
+    'DOCUMENTS_TABLE': 'local-documents',
+    'NOTIFICATIONS_TOPIC_ARN': '',  # skip SNS publish locally
+}
+
+CORS_HEADERS = {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Headers': 'Content-Type,Authorization',
+    'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS',
+}
+
+_modules = {}
+_dispatch_lock = threading.Lock()
+
+
+def load_handler(*path):
+    name = 'local_' + '_'.join(path[1:])
+    if name not in _modules:
+        file_path = os.path.join(ROOT, *path, 'handler.py')
+        spec = importlib.util.spec_from_file_location(name, file_path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+        _modules[name] = module
+    return _modules[name]
+
+
+FNS = 'backend', 'functions'
+
+
+def jwt_claims(auth_header):
+    """Decode the Bearer token payload (no signature check — local only)."""
+    if not auth_header or not auth_header.startswith('Bearer '):
+        return {}
+    token = auth_header[len('Bearer '):].strip()
+    try:
+        payload_b64 = token.split('.')[1]
+        payload_b64 += '=' * (-len(payload_b64) % 4)
+        return json.loads(base64.urlsafe_b64decode(payload_b64))
+    except Exception:
+        return {}
+
+
+ROUTES = [
+    ('GET',    r'^/doctors$',                     lambda m, q: load_handler(*FNS, 'doctors', 'list')),
+    ('POST',   r'^/doctors$',                     lambda m, q: load_handler(*FNS, 'doctors', 'create')),
+    ('GET',    r'^/doctors/([^/]+)$',             lambda m, q: load_handler(*FNS, 'doctors', 'get')),
+    ('PUT',    r'^/doctors/([^/]+)$',             lambda m, q: load_handler(*FNS, 'doctors', 'update')),
+    ('GET',    r'^/doctors/([^/]+)/availability$', lambda m, q: load_handler(*FNS, 'doctors', 'availability', 'get')),
+    ('PUT',    r'^/doctors/([^/]+)/availability$', lambda m, q: load_handler(*FNS, 'doctors', 'availability', 'set')),
+    ('GET',    r'^/appointments$',                lambda m, q: load_handler(*FNS, 'appointments', 'list')),
+    ('POST',   r'^/appointments$',                lambda m, q: load_handler(*FNS, 'appointments', 'create')),
+    ('GET',    r'^/appointments/([^/]+)$',        lambda m, q: load_handler(*FNS, 'appointments', 'get')),
+    ('DELETE', r'^/appointments/([^/]+)$',        lambda m, q: load_handler(*FNS, 'appointments', 'cancel')),
+    ('PUT',    r'^/appointments/([^/]+)/approval$', lambda m, q: load_handler(*FNS, 'appointments', 'approve')),
+    ('PUT',    r'^/appointments/([^/]+)/reschedule$', lambda m, q: load_handler(*FNS, 'appointments', 'reschedule')),
+    ('GET',    r'^/patients$',                    lambda m, q: load_handler(*FNS, 'patients', 'list')),
+    ('POST',   r'^/patients$',                    lambda m, q: load_handler(*FNS, 'patients', 'create')),
+    ('GET',    r'^/patients/([^/]+)$',            lambda m, q: load_handler(*FNS, 'patients', 'get')),
+    ('PUT',    r'^/patients/([^/]+)$',            lambda m, q: load_handler(*FNS, 'patients', 'update')),
+]
+
+
+# route param names, parallel to the regexes above
+PARAM_NAME = {
+    '/doctors/([^/]+)': 'doctorId',
+    '/doctors/([^/]+)/availability': 'doctorId',
+    '/appointments/([^/]+)': 'appointmentId',
+    '/appointments/([^/]+)/approval': 'appointmentId',
+    '/appointments/([^/]+)/reschedule': 'appointmentId',
+    '/patients/([^/]+)': 'patientId',
+}
+
+
+class Handler(BaseHTTPRequestHandler):
+    def _cors(self):
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+        self.send_header('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS')
+
+    def _read_body(self):
+        length = int(self.headers.get('Content-Length') or 0)
+        return self.rfile.read(length).decode('utf-8') if length else None
+
+    def _handle(self, method):
+        parsed = urlparse(self.path)
+        query = parse_qs(parsed.query) if parsed.query else {}
+        body = self._read_body() if method in ('POST', 'PUT') else None
+
+        if method == 'OPTIONS':
+            self.send_response(204)
+            self._cors()
+            self.end_headers()
+            return
+
+        for route_method, pattern, loader in ROUTES:
+            if route_method != method:
+                continue
+            match = re.match(pattern, parsed.path)
+            if not match:
+                continue
+
+            claims = jwt_claims(self.headers.get('Authorization'))
+
+            # rebuild pathParameters with the correct key name for this route
+            param_key = None
+            for frag, name in PARAM_NAME.items():
+                if frag in pattern:
+                    param_key = name
+                    break
+
+            event = {
+                'httpMethod': method,
+                'body': body,
+                'queryStringParameters': {k: v[-1] for k, v in query.items()} or None,
+                'requestContext': {'authorizer': {'claims': claims}},
+            }
+            if match.groups():
+                event['pathParameters'] = {param_key or 'id': match.group(1)}
+
+            handler_module = loader(match, query)
+            with _dispatch_lock:  # moto backends are not thread-safe
+                try:
+                    result = handler_module.handler(event, None)
+                except Exception as e:
+                    print(f'  !! handler crashed: {e}')
+                    result = {'statusCode': 500, 'headers': {},
+                              'body': json.dumps({'error': f'handler error: {e}'})}
+
+            status = result.get('statusCode', 200)
+            resp_body = result.get('body', '')
+            self.send_response(status)
+            self.send_header('Content-Type', 'application/json')
+            self._cors()
+            self.send_header('Content-Length', str(len(resp_body.encode())))
+            self.end_headers()
+            self.wfile.write(resp_body.encode())
+            print(f'{method:7} {parsed.path:45} -> {status}  ({claims.get("email", "anonymous")})')
+            return
+
+        self.send_response(404)
+        self.send_header('Content-Type', 'application/json')
+        self._cors()
+        msg = json.dumps({'error': f'No local route for {method} {parsed.path}'})
+        self.send_header('Content-Length', str(len(msg.encode())))
+        self.end_headers()
+        self.wfile.write(msg.encode())
+
+    def do_GET(self): self._handle('GET')
+    def do_POST(self): self._handle('POST')
+    def do_PUT(self): self._handle('PUT')
+    def do_DELETE(self): self._handle('DELETE')
+    def do_OPTIONS(self): self._handle('OPTIONS')
+
+    def log_message(self, *a):  # silence default noisy logging; we print our own
+        pass
+
+
+def call(handler_module, event):
+    return handler_module.handler(event, None)
+
+
+def seed():
+    """Seed demo data THROUGH the real handlers (extra verification for free)."""
+    def event(body, sub, groups, method='POST', path=None):
+        e = {'httpMethod': method,
+             'body': json.dumps(body) if body is not None else None,
+             'requestContext': {'authorizer': {'claims': {'sub': sub, 'cognito:groups': groups}}}}
+        if path:
+            e['pathParameters'] = path
+        return e
+
+    doctor_sub = 'local-doctor-1'
+    print('Seeding via real handlers…')
+    r = call(load_handler(*FNS, 'doctors', 'create'), event(
+        {'name': 'Dr. Maya Patel', 'email': 'maya@local.test', 'specialty': 'Cardiology',
+         'qualification': 'MBBS, MD', 'experience': '12 years'}, doctor_sub, ['doctor']))
+    assert r['statusCode'] == 201, r['body']
+
+    avail = {day: ['09:00', '10:30', '14:00'] for day in
+             ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']}
+    r = call(load_handler(*FNS, 'doctors', 'availability', 'set'), event(
+        {'availability': avail}, doctor_sub, ['doctor'], method='PUT', path={'doctorId': doctor_sub}))
+    assert r['statusCode'] == 200, r['body']
+
+    for sub, name, email in [('local-patient-1', 'Priya Sharma', 'priya@local.test'),
+                             ('local-patient-2', 'Rahul Mehta', 'rahul@local.test')]:
+        r = call(load_handler(*FNS, 'patients', 'create'), event(
+            {'name': name, 'email': email, 'phone': '+91 90000 00000',
+             'bloodGroup': 'O+'}, sub, ['patient']))
+        assert r['statusCode'] == 201, r['body']
+
+    print('Seeded: 1 doctor (7-day availability), 2 patients\n')
+
+
+def main():
+    os.environ.update(TABLES)
+    os.environ.setdefault('AWS_DEFAULT_REGION', 'ap-south-1')
+    os.environ.setdefault('AWS_ACCESS_KEY_ID', 'local')
+    os.environ.setdefault('AWS_SECRET_ACCESS_KEY', 'local')
+
+    mock = mock_aws()
+    mock.start()
+    dynamo = boto3.resource('dynamodb')
+    for name, key in [('local-patients', 'patientId'), ('local-doctors', 'doctorId'),
+                      ('local-appointments', 'appointmentId'), ('local-slots', 'slotKey'),
+                      ('local-records', 'recordId'), ('local-documents', 'documentId')]:
+        dynamo.create_table(
+            TableName=name,
+            KeySchema=[{'AttributeName': key, 'KeyType': 'HASH'}],
+            AttributeDefinitions=[{'AttributeName': key, 'AttributeType': 'S'}],
+            BillingMode='PAY_PER_REQUEST',
+        )
+
+    seed()
+
+    server = ThreadingHTTPServer(('127.0.0.1', PORT), Handler)
+    print(f'Carely LOCAL dev API on http://127.0.0.1:{PORT} (real handlers + moto DynamoDB)')
+    print('Serve the frontend with:  python3 -m http.server 8080 --directory frontend\n')
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print('\nShutting down.')
+
+
+if __name__ == '__main__':
+    main()

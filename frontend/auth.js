@@ -4,18 +4,7 @@
 
 (function () {
   const C = window.AmazonCognitoIdentity;
-
-  function configured() {
-    const cfg = window.CARELY_CONFIG || {};
-    return Boolean(cfg.userPoolId && cfg.userPoolClientId && cfg.region);
-  }
-
-  function pool() {
-    return new C.CognitoUserPool({
-      UserPoolId: window.CARELY_CONFIG.userPoolId,
-      ClientId: window.CARELY_CONFIG.userPoolClientId,
-    });
-  }
+  const CFG = window.CARELY_CONFIG || {};
 
   function decodeJwtPayload(token) {
     try {
@@ -24,6 +13,85 @@
     } catch (e) {
       return {};
     }
+  }
+
+  function claimsFromPayload(payload) {
+    const groups = payload['cognito:groups'] || [];
+    return {
+      sub: payload['sub'],
+      email: payload['email'] || '',
+      name: payload['name'] || '',
+      groups,
+      role: groups.includes('admin') ? 'admin' : groups.includes('doctor') ? 'doctor' : groups.includes('patient') ? 'patient' : null,
+    };
+  }
+
+  /* ── LOCAL DEV MODE ────────────────────────────────────────────────────────
+     Active ONLY when CARELY_CONFIG.localMode is true. Cognito is replaced by
+     an in-browser shim (no AWS calls); the backend endpoints must be served
+     by scripts/local_dev_server.py, which runs the REAL Lambda handlers
+     against a local DynamoDB emulation. */
+  if (CFG.localMode) {
+    const USERS = CFG.localUsers || {};
+    const SESSION_KEY = 'carely_local_session';
+
+    const b64url = (obj) =>
+      btoa(JSON.stringify(obj)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+
+    const makeSession = (u) => {
+      const token = [
+        b64url({ alg: 'none', typ: 'JWT' }),
+        b64url({ sub: u.sub, email: u.email, name: u.name, 'cognito:groups': [u.role] }),
+        'localsig',
+      ].join('.');
+      return { getIdToken: () => ({ getJwtToken: () => token }) };
+    };
+
+    window.carelyAuth = {
+      configured: () => true,
+
+      signIn(email, password) {
+        return new Promise((resolve, reject) => {
+          const u = USERS[email];
+          if (!u || password !== u.password) {
+            reject(new Error('Local mode: unknown account or wrong password'));
+          } else {
+            localStorage.setItem(SESSION_KEY, JSON.stringify({ email: u.email }));
+            resolve(makeSession(u));
+          }
+        });
+      },
+
+      signUp: () => Promise.reject(new Error('Sign-up is disabled in local dev mode')),
+      confirmSignUp: () => Promise.reject(new Error('Sign-up is disabled in local dev mode')),
+
+      signOut() { localStorage.removeItem(SESSION_KEY); },
+
+      getSession() {
+        return new Promise((resolve) => {
+          const raw = localStorage.getItem(SESSION_KEY);
+          const u = raw && USERS[JSON.parse(raw).email];
+          resolve(u ? makeSession(u) : null);
+        });
+      },
+
+      idToken: (session) => (session ? session.getIdToken().getJwtToken() : null),
+      claims: (session) => claimsFromPayload(decodeJwtPayload(session.getIdToken().getJwtToken())),
+    };
+
+    console.info('[Carely] LOCAL DEV MODE — Cognito/AWS mocked; API handlers run locally via scripts/local_dev_server.py');
+    return;
+  }
+
+  function configured() {
+    return Boolean(CFG.userPoolId && CFG.userPoolClientId && CFG.region);
+  }
+
+  function pool() {
+    return new C.CognitoUserPool({
+      UserPoolId: window.CARELY_CONFIG.userPoolId,
+      ClientId: window.CARELY_CONFIG.userPoolClientId,
+    });
   }
 
   function cognitoUser(email) {
@@ -89,14 +157,7 @@
     /* Caller info derived from the ID token claims. */
     claims(session) {
       const payload = session ? decodeJwtPayload(session.getIdToken().getJwtToken()) : {};
-      const groups = payload['cognito:groups'] || [];
-      return {
-        sub: payload['sub'],
-        email: payload['email'] || '',
-        name: payload['name'] || '',
-        groups,
-        role: groups.includes('admin') ? 'admin' : groups.includes('doctor') ? 'doctor' : groups.includes('patient') ? 'patient' : null,
-      };
+      return claimsFromPayload(payload);
     },
   };
 })();

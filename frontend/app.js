@@ -66,6 +66,14 @@ async function guard(fn) {
 
 function renderLogin(mode = 'signin', message = '') {
   const unconfigured = !backendConfigured();
+  const local = window.CARELY_CONFIG && window.CARELY_CONFIG.localMode;
+  const localHint = local ? `
+    <div class="notice" style="margin:16px 0">
+      <b>Local dev mode</b> — Cognito/AWS mocked, handlers run locally.
+      Demo accounts (password <code>Local#123</code>):
+      ${Object.entries(window.CARELY_CONFIG.localUsers || {})
+        .map(([email, u]) => `<br>· <code>${esc(email)}</code> (${u.role})`).join('')}
+    </div>` : '';
   document.getElementById('app').innerHTML = `
     <main class="login-wrap">
       <section class="login">
@@ -74,11 +82,11 @@ function renderLogin(mode = 'signin', message = '') {
         <h1>${mode === 'signup' ? 'Create your account' : mode === 'verify' ? 'Verify your email' : 'Welcome back'}</h1>
         ${message ? `<p class="date">${esc(message)}</p>` : '<p class="date">Sign in to access your secure workspace.</p>'}
         ${unconfigured ? `<div class="alert notice" style="margin:14px 0">Backend not configured. Run <b>scripts/update_frontend_config.sh</b> after deploying the AWS stack.</div>` : ''}
+        ${localHint}
         ${mode === 'signin' ? signInForm() : mode === 'signup' ? signUpForm() : verifyForm()}
         <p class="hint">Sign-up creates a <b>patient</b> account. Doctor and admin access is provisioned by the hospital.</p>
       </section>
     </main>`;
-  document.getElementById('toast-host')?.removeEventListener?.();
 }
 
 function signInForm() {
