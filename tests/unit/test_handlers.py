@@ -277,6 +277,64 @@ class TestAppointmentsCancelHandler:
         assert resp['statusCode'] == 403
 
 
+# ── documents/list ────────────────────────────────────────────────────────────
+
+class TestDocumentsListHandler:
+
+    @patch.dict(os.environ, {'DOCUMENTS_TABLE': 'test-documents'})
+    @patch('boto3.resource')
+    def test_patient_list_scoped_to_own_sub(self, mock_resource):
+        mock_table = MagicMock()
+        mock_resource.return_value.Table.return_value = mock_table
+        mock_table.scan.return_value = {'Items': [{'documentId': 'd-1', 'patientId': 'p-1'}]}
+
+        h = _import(['backend', 'functions', 'documents', 'list'])
+        event = auth_event(None, sub='p-1', groups=('patient',), method='GET')
+        event['queryStringParameters'] = {'patientId': 'p-999'}
+        resp = h.handler(event, None)
+
+        assert resp['statusCode'] == 200
+        filter_expr = mock_table.scan.call_args.kwargs.get('FilterExpression')
+        assert filter_expr is not None
+        # The filter must use the caller's sub (p-1), never the forged p-999
+        assert filter_expr._values[-1] == 'p-1'
+
+    @patch.dict(os.environ, {'DOCUMENTS_TABLE': 'test-documents'})
+    @patch('boto3.resource')
+    def test_doctor_can_filter_by_patient(self, mock_resource):
+        mock_table = MagicMock()
+        mock_resource.return_value.Table.return_value = mock_table
+        mock_table.scan.return_value = {'Items': [{'documentId': 'd-1', 'patientId': 'p-1'}]}
+
+        h = _import(['backend', 'functions', 'documents', 'list'])
+        event = auth_event(None, sub='doc-1', groups=('doctor',), method='GET')
+        event['queryStringParameters'] = {'patientId': 'p-1'}
+        resp = h.handler(event, None)
+
+        assert resp['statusCode'] == 200
+        assert json.loads(resp['body'])['count'] == 1
+
+    @patch.dict(os.environ, {'DOCUMENTS_TABLE': 'test-documents'})
+    @patch('boto3.resource')
+    def test_doctor_without_filter_lists_all(self, mock_resource):
+        mock_table = MagicMock()
+        mock_resource.return_value.Table.return_value = mock_table
+        mock_table.scan.return_value = {'Items': []}
+
+        h = _import(['backend', 'functions', 'documents', 'list'])
+        resp = h.handler(auth_event(None, sub='doc-1', groups=('doctor',), method='GET'), None)
+
+        assert resp['statusCode'] == 200
+        assert mock_table.scan.call_args.kwargs.get('FilterExpression') is None
+
+    @patch.dict(os.environ, {'DOCUMENTS_TABLE': 'test-documents'})
+    @patch('boto3.resource')
+    def test_unauthenticated_rejected(self, mock_resource):
+        h = _import(['backend', 'functions', 'documents', 'list'])
+        resp = h.handler({'queryStringParameters': None}, None)
+        assert resp['statusCode'] == 401
+
+
 # ── notifications ─────────────────────────────────────────────────────────────
 
 class TestNotificationsHandler:

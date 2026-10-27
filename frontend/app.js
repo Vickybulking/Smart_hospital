@@ -175,6 +175,8 @@ const NAV = {
     { id: 'overview', label: 'Overview' },
     { id: 'book', label: 'Book appointment' },
     { id: 'appointments', label: 'My appointments' },
+    { id: 'records', label: 'Medical records' },
+    { id: 'documents', label: 'My documents' },
     { id: 'profile', label: 'My profile' },
   ],
   doctor: [
@@ -182,6 +184,7 @@ const NAV = {
     { id: 'schedule', label: 'My schedule' },
     { id: 'patients', label: 'My patients' },
     { id: 'queue', label: 'Appointment requests' },
+    { id: 'records', label: 'Patient records' },
   ],
   admin: [
     { id: 'overview', label: 'Overview' },
@@ -254,8 +257,8 @@ async function renderPage() {
   const content = document.getElementById('page-content');
   const title = document.getElementById('page-title');
   const map = {
-    'patient': { overview: [patientOverview, 'Your dashboard'], book: [bookAppointment, 'Book a consultation'], appointments: [patientAppointments, 'My appointments'], profile: [patientProfile, 'My profile'] },
-    'doctor': { overview: [doctorOverview, 'Your dashboard'], schedule: [doctorSchedule, 'My schedule'], patients: [doctorPatients, 'My patients'], queue: [doctorQueue, 'Appointment requests'] },
+    'patient': { overview: [patientOverview, 'Your dashboard'], book: [bookAppointment, 'Book a consultation'], appointments: [patientAppointments, 'My appointments'], records: [patientRecords, 'Medical records'], documents: [patientDocuments, 'My documents'], profile: [patientProfile, 'My profile'] },
+    'doctor': { overview: [doctorOverview, 'Your dashboard'], schedule: [doctorSchedule, 'My schedule'], patients: [doctorPatients, 'My patients'], queue: [doctorQueue, 'Appointment requests'], records: [doctorRecords, 'Patient records'] },
     'admin': { overview: [adminOverview, 'Hospital overview'], doctors: [adminDoctors, 'Manage doctors'], patients: [adminPatients, 'Manage patients'], appointments: [adminAppointments, 'All appointments'] },
   };
   const entry = (map[state.role] || {})[state.page] || map[state.role].overview;
@@ -700,6 +703,198 @@ async function doctorPatients() {
         }).join('')}
       </table>` : '<p class="date">No patients yet — they appear here once they book with you.</p>'}
     </section>`;
+}
+
+/* ── medical records & documents ─────────────────────────────────────────── */
+
+async function patientRecords() {
+  const [res, doctors] = await Promise.all([
+    carelyApi('/medical-records?limit=100'),
+    loadDoctors().catch(() => []),
+  ]);
+  const records = (res.records || []).slice()
+    .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+  return `
+    <section class="card">
+      <div class="section-head"><div><div class="eyebrow">Your clinical history</div><h2>Medical records</h2></div>
+        <span class="badge">${records.length} record${records.length === 1 ? '' : 's'}</span></div>
+      ${records.length ? records.map(r => {
+        const doc = doctors.find(d => d.doctorId === r.doctorId);
+        return `
+        <div class="record-item">
+          <div class="record-head">
+            <div>
+              <b>${esc(r.title)}</b>
+              <p class="date">${esc(doc ? doc.name : 'Doctor')} · ${esc(r.type || 'general')} · ${fmtDateTime(r.createdAt)}</p>
+            </div>
+          </div>
+          ${r.notes ? `<p class="record-notes">${esc(r.notes)}</p>` : ''}
+        </div>`;
+      }).join('') : '<p class="date">No medical records yet. Your doctor adds records after consultations.</p>'}
+      <div class="notice">🔒 Only you and authorised hospital staff can see these records.</div>
+    </section>`;
+}
+
+async function patientDocuments() {
+  const res = await carelyApi('/documents?limit=100');
+  const documents = (res.documents || []).slice()
+    .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+  return `
+    <section class="card">
+      <div class="section-head"><div><div class="eyebrow">Private file storage</div><h2>My documents</h2></div>
+        <span class="badge">${documents.length} file${documents.length === 1 ? '' : 's'}</span></div>
+      <div class="upload-row">
+        <input type="file" id="doc-file">
+        <button class="btn" id="btn-doc-upload" onclick="uploadDocument()">Upload document</button>
+      </div>
+      ${documents.length ? `<table class="table">
+        <tr><th>File</th><th>Type</th><th>Uploaded</th><th>Action</th></tr>
+        ${documents.map(d => `<tr>
+          <td><b>${esc(d.fileName)}</b><br><small>${esc(d.fileKey.slice(0, 24))}…</small></td>
+          <td>${esc(d.contentType || '—')}</td>
+          <td>${fmtDateTime(d.createdAt)}</td>
+          <td><button class="link" onclick="downloadDocument('${esc(d.fileKey)}')">Download</button>
+              <button class="link" onclick="deleteDocument('${esc(d.documentId)}')">Delete</button></td>
+        </tr>`).join('')}
+      </table>` : '<p class="date">No documents uploaded yet. Reports, prescriptions and scans can be stored here.</p>'}
+      <div class="notice">🔒 Files are stored privately in S3 and served through short-lived signed URLs.</div>
+    </section>`;
+}
+
+async function uploadDocument() {
+  const input = document.getElementById('doc-file');
+  const file = input && input.files && input.files[0];
+  if (!file) return toast('Choose a file to upload first', true);
+  const btn = document.getElementById('btn-doc-upload');
+  btn.disabled = true; btn.textContent = 'Uploading…';
+  try {
+    const contentType = file.type || 'application/octet-stream';
+    const { uploadUrl, fileKey } = await carelyApi('/documents/upload-url', {
+      method: 'POST',
+      body: JSON.stringify({ contentType, patientId: state.claims.sub }),
+    });
+    // Byte transfer: presigned S3 URL when deployed; local endpoint in local mode.
+    const putTarget = window.CARELY_CONFIG.localMode
+      ? `${window.CARELY_CONFIG.apiUrl}/local-upload?fileKey=${encodeURIComponent(fileKey)}`
+      : uploadUrl;
+    const putHeaders = { 'Content-Type': contentType };
+    if (window.CARELY_CONFIG.localMode) {
+      // The local byte endpoint enforces the same RBAC as the API itself
+      const session = await window.carelyAuth.getSession();
+      putHeaders['Authorization'] = `Bearer ${window.carelyAuth.idToken(session)}`;
+    }
+    const put = await fetch(putTarget, {
+      method: 'PUT',
+      headers: putHeaders,
+      body: file,
+    });
+    if (!put.ok) throw new Error(`Upload failed (${put.status})`);
+    await carelyApi('/documents/metadata', {
+      method: 'POST',
+      body: JSON.stringify({
+        patientId: state.claims.sub, fileKey, fileName: file.name, contentType,
+      }),
+    });
+    toast('Document uploaded.');
+    await rerenderPage();
+  } catch (err) {
+    btn.disabled = false; btn.textContent = 'Upload document';
+    toast(err.message || 'Upload failed', true);
+  }
+}
+
+async function downloadDocument(fileKey) {
+  try {
+    if (window.CARELY_CONFIG.localMode) {
+      window.open(`${window.CARELY_CONFIG.apiUrl}/local-download?fileKey=${encodeURIComponent(fileKey)}`);
+      return;
+    }
+    const { downloadUrl } = await carelyApi(`/documents/download-url?fileKey=${encodeURIComponent(fileKey)}`);
+    window.open(downloadUrl);
+  } catch (err) {
+    toast(err.message || 'Download failed', true);
+  }
+}
+
+async function deleteDocument(id) {
+  if (!confirm('Delete this document permanently?')) return;
+  try {
+    await carelyApi(`/documents/${id}`, { method: 'DELETE' });
+    toast('Document deleted.');
+    await rerenderPage();
+  } catch (err) {
+    toast(err.message || 'Delete failed', true);
+  }
+}
+
+const doctorRecSel = { patientId: '' };
+
+async function doctorRecords() {
+  await Promise.all([loadAppointments(), loadDoctors().catch(() => [])]);
+  const patientIds = [...new Set(state.appointments.map(a => a.patientId))];
+  if (!patientIds.length) {
+    return '<section class="card"><h2>Patient records</h2><p class="date">Patients appear here once they book appointments with you.</p></section>';
+  }
+  if (!doctorRecSel.patientId || !patientIds.includes(doctorRecSel.patientId)) {
+    doctorRecSel.patientId = patientIds[0];
+  }
+  const names = {};
+  await Promise.all(patientIds.map(async pid => {
+    try { names[pid] = (await carelyApi(`/patients/${pid}`)).name; } catch (e) { names[pid] = null; }
+  }));
+  const res = await carelyApi(`/medical-records?patientId=${encodeURIComponent(doctorRecSel.patientId)}&limit=100`);
+  const records = (res.records || []).slice()
+    .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+  return `
+    <section class="card">
+      <div class="section-head"><div><div class="eyebrow">Clinical documentation</div><h2>Patient records</h2></div>
+        <span class="badge">Only your patients</span></div>
+      <label>Select patient
+        <select onchange="doctorRecSel.patientId=this.value;rerenderPage()">
+          ${patientIds.map(pid => `<option value="${esc(pid)}" ${pid === doctorRecSel.patientId ? 'selected' : ''}>${esc(names[pid] || `Patient ${pid.slice(0, 8)}`)}</option>`).join('')}
+        </select>
+      </label>
+      <div class="form" style="margin-top:18px">
+        <label>New record title<input id="mr-title" placeholder="e.g. Follow-up consultation"></label>
+        <label>Clinical notes<textarea id="mr-notes" rows="4" placeholder="Findings, diagnosis, medications, advice…"></textarea></label>
+        <label>Type<select id="mr-type">
+          <option value="consultation">Consultation</option>
+          <option value="prescription">Prescription</option>
+          <option value="lab-report">Lab report</option>
+          <option value="general">General</option>
+        </select></label>
+        <button class="btn" id="btn-mr-save" onclick="createMedicalRecord()">Save record →</button>
+      </div>
+      <div class="section-head" style="margin-top:26px"><h2>Records for ${esc(names[doctorRecSel.patientId] || 'this patient')}</h2></div>
+      ${records.length ? records.map(r => `
+        <div class="record-item">
+          <div class="record-head"><div>
+            <b>${esc(r.title)}</b>
+            <p class="date">${esc(r.type || 'general')} · ${fmtDateTime(r.createdAt)}</p>
+          </div></div>
+          ${r.notes ? `<p class="record-notes">${esc(r.notes)}</p>` : ''}
+        </div>`).join('') : '<p class="date">No records for this patient yet.</p>'}
+    </section>`;
+}
+
+async function createMedicalRecord() {
+  const title = document.getElementById('mr-title').value.trim();
+  const notes = document.getElementById('mr-notes').value.trim();
+  const type = document.getElementById('mr-type').value;
+  if (!title) return toast('Record title is required', true);
+  const btn = document.getElementById('btn-mr-save');
+  btn.disabled = true; btn.textContent = 'Saving…';
+  try {
+    await carelyApi('/medical-records', {
+      method: 'POST',
+      body: JSON.stringify({ patientId: doctorRecSel.patientId, title, notes, type }),
+    });
+    toast('Medical record saved.');
+    await rerenderPage();
+  } catch (err) {
+    btn.disabled = false; btn.textContent = 'Save record →';
+    toast(err.message || 'Save failed', true);
+  }
 }
 
 /* ── admin screens ───────────────────────────────────────────────────────── */

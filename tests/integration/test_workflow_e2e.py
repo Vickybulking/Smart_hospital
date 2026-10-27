@@ -29,6 +29,7 @@ TABLES = {
     'APPOINTMENTS_TABLE': 'integ-appointments',
     'APPOINTMENT_SLOTS_TABLE': 'integ-slots',
     'MEDICAL_RECORDS_TABLE': 'integ-records',
+    'DOCUMENTS_TABLE': 'integ-documents',
 }
 
 
@@ -75,7 +76,7 @@ def aws():
         dynamo = boto3.resource('dynamodb')
         for name, key in [('integ-patients', 'patientId'), ('integ-doctors', 'doctorId'),
                           ('integ-appointments', 'appointmentId'), ('integ-slots', 'slotKey'),
-                          ('integ-records', 'recordId')]:
+                          ('integ-records', 'recordId'), ('integ-documents', 'documentId')]:
             dynamo.create_table(
                 TableName=name,
                 KeySchema=[{'AttributeName': key, 'KeyType': 'HASH'}],
@@ -206,4 +207,104 @@ def test_medical_records_are_doctor_authorised_and_patient_scoped(aws):
     resp = call(mr_create, event(
         {'patientId': PATIENT_SUB, 'title': 'Self note'},
         sub=PATIENT_SUB, groups=('patient',)))
+    assert resp['statusCode'] == 403
+
+
+def test_records_and_documents_flow(aws):
+    """Doctor authors a record; patient sees it; documents upload/list/download RBAC."""
+    import os
+    os.environ['DOCUMENTS_BUCKET'] = 'integ-docs-bucket'
+    s3 = boto3.client('s3')
+    region = os.environ.get('AWS_DEFAULT_REGION', 'ap-south-1')
+    if region == 'us-east-1':
+        s3.create_bucket(Bucket='integ-docs-bucket')
+    else:
+        s3.create_bucket(Bucket='integ-docs-bucket',
+                         CreateBucketConfiguration={'LocationConstraint': region})
+
+    # ── Doctor authors a medical record (doctorId forced to their sub) ──────
+    mr_create = load_handler('backend', 'functions', 'medical_records', 'create')
+    resp = call(mr_create, event(
+        {'patientId': PATIENT_SUB, 'title': 'Cardiology follow-up',
+         'notes': 'Stable. Continue medication.', 'type': 'consultation'},
+        sub=DOCTOR_SUB, groups=('doctor',)))
+    assert resp['statusCode'] == 201
+    record_id = json.loads(resp['body'])['recordId']
+
+    # ── Patient lists records: server forces scope to their own sub ─────────
+    mr_list = load_handler('backend', 'functions', 'medical_records', 'list')
+    resp = call(mr_list, event(method='GET', sub=PATIENT_SUB, groups=('patient',),
+                               query={'patientId': PATIENT2_SUB}))  # forged filter ignored
+    assert resp['statusCode'] == 200
+    records = json.loads(resp['body'])['records']
+    assert len(records) == 1 and records[0]['recordId'] == record_id
+    assert records[0]['patientId'] == PATIENT_SUB
+
+    # ── A different patient cannot read that record ─────────────────────────
+    mr_get = load_handler('backend', 'functions', 'medical_records', 'get')
+    resp = call(mr_get, event(method='GET', sub=PATIENT2_SUB, groups=('patient',),
+                              path={'recordId': record_id}))
+    assert resp['statusCode'] == 403
+
+    # ── Document upload URL: key scoped to the patient's prefix ─────────────
+    up = load_handler('backend', 'functions', 'documents', 'generate_upload_url')
+    resp = call(up, event({'contentType': 'application/pdf', 'patientId': PATIENT2_SUB},
+                          sub=PATIENT_SUB, groups=('patient',)))
+    assert resp['statusCode'] == 200
+    body = json.loads(resp['body'])
+    assert body['fileKey'].startswith(f'documents/{PATIENT_SUB}/')
+    upload_url, file_key = body['uploadUrl'], body['fileKey']
+
+    # ── Save metadata ────────────────────────────────────────────────────────
+    meta = load_handler('backend', 'functions', 'documents', 'save_metadata')
+    resp = call(meta, event({'patientId': PATIENT_SUB, 'fileKey': file_key,
+                             'fileName': 'blood-report.pdf', 'contentType': 'application/pdf'},
+                            sub=PATIENT_SUB, groups=('patient',)))
+    assert resp['statusCode'] == 201
+    document_id = json.loads(resp['body'])['documentId']
+
+    # Simulate the browser's byte transfer into S3 (what the presigned PUT does)
+    s3.put_object(Bucket='integ-docs-bucket', Key=file_key, Body=b'PDF-BYTES')
+
+    # ── Patient lists documents: sees their own ─────────────────────────────
+    dl = load_handler('backend', 'functions', 'documents', 'list')
+    resp = call(dl, event(method='GET', sub=PATIENT_SUB, groups=('patient',)))
+    assert resp['statusCode'] == 200
+    docs = json.loads(resp['body'])['documents']
+    assert len(docs) == 1 and docs[0]['fileName'] == 'blood-report.pdf'
+
+    # ── Another patient's list is empty (scope) ─────────────────────────────
+    resp = call(dl, event(method='GET', sub=PATIENT2_SUB, groups=('patient',)))
+    assert json.loads(resp['body'])['count'] == 0
+
+    # ── Download URL: patient can access own key ────────────────────────────
+    down = load_handler('backend', 'functions', 'documents', 'generate_download_url')
+    resp = call(down, event(method='GET', sub=PATIENT_SUB, groups=('patient',),
+                            query={'fileKey': file_key}))
+    assert resp['statusCode'] == 200
+
+    # ── Download URL: other patient's key is forbidden ──────────────────────
+    resp = call(down, event(method='GET', sub=PATIENT2_SUB, groups=('patient',),
+                            query={'fileKey': file_key}))
+    assert resp['statusCode'] == 403
+
+    # ── Doctor may generate a download URL for the patient's file ───────────
+    resp = call(down, event(method='GET', sub=DOCTOR_SUB, groups=('doctor',),
+                            query={'fileKey': file_key}))
+    assert resp['statusCode'] == 200
+
+    # ── Delete document: owner ok, then metadata gone ───────────────────────
+    deleter = load_handler('backend', 'functions', 'documents', 'delete')
+    resp = call(deleter, event(method='DELETE', sub=PATIENT_SUB, groups=('patient',),
+                               path={'documentId': document_id}))
+    assert resp['statusCode'] == 200
+    resp = call(dl, event(method='GET', sub=PATIENT_SUB, groups=('patient',)))
+    assert json.loads(resp['body'])['count'] == 0
+
+    # ── Non-owner cannot delete someone else's document ─────────────────────
+    resp = call(meta, event({'patientId': PATIENT2_SUB, 'fileKey': file_key,
+                             'fileName': 'x.pdf'}, sub=PATIENT2_SUB, groups=('patient',)))
+    doc2_id = json.loads(resp['body'])['documentId']
+    resp = call(deleter, event(method='DELETE', sub=PATIENT_SUB, groups=('patient',),
+                               path={'documentId': doc2_id}))
     assert resp['statusCode'] == 403

@@ -202,6 +202,11 @@ Resources:
         BlockPublicPolicy: true
         IgnorePublicAcls: true
         RestrictPublicBuckets: true
+      CorsConfiguration:
+        CorsRules:
+          - AllowedMethods: [PUT, GET]
+            AllowedOrigins: ['*']
+            AllowedHeaders: ['*']
 
   NotificationsTopic:
     Type: AWS::SNS::Topic
@@ -574,6 +579,24 @@ Resources:
             Method: get
 
   # ── Documents (presigned S3 upload/download) ────────────────────────────────
+  ListDocumentsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: functions.documents.list.handler.handler
+      Environment:
+        Variables:
+          DOCUMENTS_TABLE: !Ref DocumentsTable
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref DocumentsTable
+      Events:
+        ListDocuments:
+          Type: Api
+          Properties:
+            RestApiId: !Ref HospitalApi
+            Path: /documents
+            Method: get
+
   GenerateUploadUrlFunction:
     Type: AWS::Serverless::Function
     Properties:

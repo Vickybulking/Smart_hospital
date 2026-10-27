@@ -12,3 +12,9 @@
 .btn:disabled{opacity:.6;cursor:wait}
 .form code{background:var(--mint);padding:2px 6px;border-radius:6px;color:#148e81}
 a{color:#168f82}
+.record-item{border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin:10px 0;background:#fdfefe}
+.record-head{display:flex;justify-content:space-between;align-items:center}
+.record-head p{margin:4px 0 0}
+.record-notes{background:var(--mint);border-radius:9px;padding:10px 13px;margin:10px 0 2px;color:#175f57;white-space:pre-wrap}
+.upload-row{display:flex;gap:12px;align-items:center;margin:14px 0}
+textarea{border:1px solid var(--line);border-radius:9px;padding:12px;color:var(--ink);font:inherit;resize:vertical}

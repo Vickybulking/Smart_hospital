@@ -26,7 +26,6 @@ from urllib.parse import parse_qs, urlparse
 
 import boto3
 from moto import mock_aws
-
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, os.path.join(ROOT, 'backend', 'shared'))
 
@@ -39,8 +38,11 @@ TABLES = {
     'APPOINTMENT_SLOTS_TABLE': 'local-slots',
     'MEDICAL_RECORDS_TABLE': 'local-records',
     'DOCUMENTS_TABLE': 'local-documents',
+    'DOCUMENTS_BUCKET': 'local-documents-bucket',
     'NOTIFICATIONS_TOPIC_ARN': '',  # skip SNS publish locally
 }
+
+LOCAL_BUCKET = 'local-documents-bucket'
 
 CORS_HEADERS = {
     'Access-Control-Allow-Origin': '*',
@@ -50,6 +52,7 @@ CORS_HEADERS = {
 
 _modules = {}
 _dispatch_lock = threading.Lock()
+s3_client = None  # created in main() after local credentials are configured
 
 
 def load_handler(*path):
@@ -97,6 +100,14 @@ ROUTES = [
     ('POST',   r'^/patients$',                    lambda m, q: load_handler(*FNS, 'patients', 'create')),
     ('GET',    r'^/patients/([^/]+)$',            lambda m, q: load_handler(*FNS, 'patients', 'get')),
     ('PUT',    r'^/patients/([^/]+)$',            lambda m, q: load_handler(*FNS, 'patients', 'update')),
+    ('GET',    r'^/medical-records$',             lambda m, q: load_handler(*FNS, 'medical_records', 'list')),
+    ('POST',   r'^/medical-records$',             lambda m, q: load_handler(*FNS, 'medical_records', 'create')),
+    ('GET',    r'^/medical-records/([^/]+)$',     lambda m, q: load_handler(*FNS, 'medical_records', 'get')),
+    ('GET',    r'^/documents$',                   lambda m, q: load_handler(*FNS, 'documents', 'list')),
+    ('POST',   r'^/documents/upload-url$',        lambda m, q: load_handler(*FNS, 'documents', 'generate_upload_url')),
+    ('GET',    r'^/documents/download-url$',      lambda m, q: load_handler(*FNS, 'documents', 'generate_download_url')),
+    ('POST',   r'^/documents/metadata$',          lambda m, q: load_handler(*FNS, 'documents', 'save_metadata')),
+    ('DELETE', r'^/documents/([^/]+)$',           lambda m, q: load_handler(*FNS, 'documents', 'delete')),
 ]
 
 
@@ -108,6 +119,8 @@ PARAM_NAME = {
     '/appointments/([^/]+)/approval': 'appointmentId',
     '/appointments/([^/]+)/reschedule': 'appointmentId',
     '/patients/([^/]+)': 'patientId',
+    '/medical-records/([^/]+)': 'recordId',
+    '/documents/([^/]+)': 'documentId',
 }
 
 
@@ -117,20 +130,78 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header('Access-Control-Allow-Headers', 'Content-Type,Authorization')
         self.send_header('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS')
 
-    def _read_body(self):
+    def _read_raw(self):
         length = int(self.headers.get('Content-Length') or 0)
-        return self.rfile.read(length).decode('utf-8') if length else None
+        return self.rfile.read(length) if length else b''
+
+    def _send_json(self, status, payload):
+        msg = json.dumps(payload)
+        self.send_response(status)
+        self.send_header('Content-Type', 'application/json')
+        self._cors()
+        self.send_header('Content-Length', str(len(msg.encode())))
+        self.end_headers()
+        self.wfile.write(msg.encode())
 
     def _handle(self, method):
         parsed = urlparse(self.path)
         query = parse_qs(parsed.query) if parsed.query else {}
-        body = self._read_body() if method in ('POST', 'PUT') else None
 
         if method == 'OPTIONS':
             self.send_response(204)
             self._cors()
             self.end_headers()
             return
+
+        # Local byte-transfer endpoints: moto's presigned URLs are not
+        # reachable from a browser, so local mode uploads/downloads the raw
+        # object through this server instead. The API contract (upload-url,
+        # metadata, download-url, list) is unchanged.
+        claims = jwt_claims(self.headers.get('Authorization'))
+        if parsed.path == '/local-upload' and method == 'PUT':
+            file_key = (query.get('fileKey') or [''])[0]
+            caller = claims.get('sub', '')
+            if not caller or not file_key.startswith(f'documents/{caller}/'):
+                self._send_json(403, {'error': 'Not authorised to upload this file key'})
+                return
+            length = int(self.headers.get('Content-Length') or 0)
+            raw = self.rfile.read(length)
+            with _dispatch_lock:
+                s3_client.put_object(
+                    Bucket=LOCAL_BUCKET, Key=file_key, Body=raw,
+                    ContentType=self.headers.get('Content-Type', 'application/octet-stream'))
+            self._send_json(200, {'status': 'success', 'fileKey': file_key, 'bytes': len(raw)})
+            print(f'{"PUT":7} /local-upload -> 200  ({claims.get("email", "?")}, {len(raw)} bytes)')
+            return
+        if parsed.path == '/local-download' and method == 'GET':
+            file_key = (query.get('fileKey') or [''])[0]
+            caller = claims.get('sub', '')
+            if not caller or (
+                not file_key.startswith(f'documents/{caller}/')
+                and 'doctor' not in claims.get('cognito:groups', [])
+                and 'admin' not in claims.get('cognito:groups', [])
+            ):
+                self._send_json(403, {'error': 'Not authorised to download this file key'})
+                return
+            with _dispatch_lock:
+                try:
+                    obj = s3_client.get_object(Bucket=LOCAL_BUCKET, Key=file_key)
+                    raw = obj['Body'].read()
+                    ctype = obj.get('ContentType', 'application/octet-stream')
+                except s3_client.exceptions.NoSuchKey:
+                    self._send_json(404, {'error': f'{file_key} not found'})
+                    return
+            self.send_response(200)
+            self.send_header('Content-Type', ctype)
+            self.send_header('Content-Disposition', f'attachment; filename="{file_key.rsplit("/", 1)[-1]}"')
+            self._cors()
+            self.send_header('Content-Length', str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+            print(f'{"GET":7} /local-download -> 200  ({claims.get("email", "?")}, {len(raw)} bytes)')
+            return
+
+        body = self._read_raw().decode('utf-8', errors='replace') if method in ('POST', 'PUT') else None
 
         for route_method, pattern, loader in ROUTES:
             if route_method != method:
@@ -240,6 +311,8 @@ def main():
 
     mock = mock_aws()
     mock.start()
+    global s3_client
+    s3_client = boto3.client('s3')
     dynamo = boto3.resource('dynamodb')
     for name, key in [('local-patients', 'patientId'), ('local-doctors', 'doctorId'),
                       ('local-appointments', 'appointmentId'), ('local-slots', 'slotKey'),
@@ -249,6 +322,14 @@ def main():
             KeySchema=[{'AttributeName': key, 'KeyType': 'HASH'}],
             AttributeDefinitions=[{'AttributeName': key, 'AttributeType': 'S'}],
             BillingMode='PAY_PER_REQUEST',
+        )
+    region = os.environ.get('AWS_DEFAULT_REGION', 'us-east-1')
+    if region == 'us-east-1':
+        s3_client.create_bucket(Bucket=LOCAL_BUCKET)
+    else:
+        s3_client.create_bucket(
+            Bucket=LOCAL_BUCKET,
+            CreateBucketConfiguration={'LocationConstraint': region},
         )
 
     seed()
