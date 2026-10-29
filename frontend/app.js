@@ -949,7 +949,7 @@ async function doctorVoiceReports() {
           <button class="btn ${voiceState.recording ? '' : 'secondary'}" id="btn-vr-record" onclick="toggleDictation()">
             ${voiceState.recording ? '⏹ Stop dictation' : '🎙 Start live dictation'}
           </button>
-          <span class="badge" id="vr-speaker" onclick="toggleSpeaker()" style="cursor:pointer" title="Tap between speakers as the conversation moves">Speaking: Doctor ⇄</span>
+          <span class="badge" id="vr-speaker" onclick="toggleSpeaker()" style="cursor:pointer" title="Tap BETWEEN lines: the label applies to the next line you speak">Next line: Doctor ⇄</span>
           <span id="vr-rec-status" class="date">${voiceState.recording ? 'Listening…' : 'Idle'}</span>
         </div>
         <label>Consultation transcript (edit freely before generating)
@@ -984,18 +984,18 @@ async function doctorVoiceReports() {
 function toggleSpeaker() {
   voiceState.speaker = voiceState.speaker === 'Patient' ? 'Doctor' : 'Patient';
   const b = document.getElementById('vr-speaker');
-  if (b) b.textContent = `Speaking: ${voiceState.speaker} ⇄`;
+  if (b) b.textContent = `Next line: ${voiceState.speaker} ⇄`;
 }
 
 function toggleDictation() {
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!SR) return toast('Live dictation needs Chrome/Edge. Use the audio upload instead.', true);
+  if (!SR) return toast('Live dictation needs Chrome/Edge. Type the transcript instead — same pipeline.', true);
   if (!voiceState.recording) {
     // Ask for the mic explicitly first — SpeechRecognition failures are silent otherwise
     navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
       stream.getTracks().forEach(t => t.stop());
       startRecognition();
-    }).catch(err => {
+    }).catch(() => {
       const st = document.getElementById('vr-rec-status');
       if (st) st.textContent = '❌ Microphone blocked';
       toast('Microphone blocked. Click the 🔒 icon next to the address bar → allow Microphone → reload.', true);
@@ -1003,8 +1003,6 @@ function toggleDictation() {
   } else {
     voiceState.recording = false;
     try { voiceState.recognition.stop(); } catch (e) {}
-    const ta = document.getElementById('vr-transcript');
-    if (ta) voiceState.transcript = ta.value.trim();
     const btn = document.getElementById('btn-vr-record');
     if (btn) { btn.textContent = '🎙 Start live dictation'; btn.classList.add('secondary'); }
     const st = document.getElementById('vr-rec-status');
@@ -1018,17 +1016,28 @@ function startRecognition() {
   voiceState.recognition.continuous = true;
   voiceState.recognition.interimResults = true;
   voiceState.recognition.lang = voiceState.lang || 'en-IN';
+  const done = new Set();  // per-session dedupe: Chrome re-delivers finalized results
+
   voiceState.recognition.onresult = (e) => {
     let interim = '';
-    for (let i = e.resultIndex; i < e.results.length; i++) {
-      const t = e.results[i][0].transcript;
-      if (e.results[i].isFinal) {
-        voiceState.transcript = (voiceState.transcript ? voiceState.transcript + '\n' : '')
-          + `${voiceState.speaker}: ${t.trim()}`;
-      } else interim += t;
+    for (let i = 0; i < e.results.length; i++) {
+      const r = e.results[i];
+      const key = i + '|' + r[0].transcript;
+      if (r.isFinal && !done.has(key)) {
+        done.add(key);
+        // Label is fixed the moment the line is committed; tap the speaker
+        // toggle BETWEEN lines (after this line appears, before speaking).
+        const line = `${voiceState.speaker}: ${r[0].transcript.trim()}`;
+        const ta = document.getElementById('vr-transcript');
+        if (ta) ta.value = (ta.value ? ta.value + '\n' : '') + line;
+      } else if (!r.isFinal) {
+        interim += r[0].transcript;
+      }
     }
-    const ta = document.getElementById('vr-transcript');
-    if (ta) ta.value = (voiceState.transcript ? voiceState.transcript + '\n' : '') + (interim ? `[${voiceState.speaker}] ${interim}` : '');
+    const st = document.getElementById('vr-rec-status');
+    if (st) st.textContent = interim
+      ? `Hearing (${voiceState.speaker}): ${interim}`
+      : 'Listening… tap the toggle between speakers';
   };
   voiceState.recognition.onerror = (e) => {
     const st = document.getElementById('vr-rec-status');
@@ -1055,7 +1064,7 @@ function startRecognition() {
   const btn = document.getElementById('btn-vr-record');
   if (btn) { btn.textContent = '⏹ Stop dictation'; btn.classList.remove('secondary'); }
   const st = document.getElementById('vr-rec-status');
-  if (st) st.textContent = 'Listening… tap the speaker toggle as the conversation moves';
+  if (st) st.textContent = 'Listening… tap the toggle between speakers';
 }
 
 async function generateVoiceReport() {
