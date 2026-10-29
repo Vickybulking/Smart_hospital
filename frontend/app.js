@@ -991,30 +991,15 @@ function toggleDictation() {
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SR) return toast('Live dictation needs Chrome/Edge. Use the audio upload instead.', true);
   if (!voiceState.recording) {
-    voiceState.recognition = new SR();
-    voiceState.recognition.continuous = true;
-    voiceState.recognition.interimResults = true;
-    voiceState.recognition.lang = 'en-IN';
-    voiceState.recognition.onresult = (e) => {
-      let interim = '';
-      for (let i = e.resultIndex; i < e.results.length; i++) {
-        const t = e.results[i][0].transcript;
-        if (e.results[i].isFinal) {
-          voiceState.transcript = (voiceState.transcript ? voiceState.transcript + '\n' : '')
-            + `${voiceState.speaker}: ${t.trim()}`;
-        } else interim += t;
-      }
-      const ta = document.getElementById('vr-transcript');
-      if (ta) ta.value = (voiceState.transcript ? voiceState.transcript + '\n' : '') + (interim ? `[${voiceState.speaker}] ${interim}` : '');
-    };
-    voiceState.recognition.onend = () => { if (voiceState.recording) try { voiceState.recognition.start(); } catch (e) {} };
-    voiceState.recognition.start();
-    voiceState.recording = true;
-    voiceState.speaker = 'Doctor';
-    const btn = document.getElementById('btn-vr-record');
-    if (btn) { btn.textContent = '⏹ Stop dictation'; btn.classList.remove('secondary'); }
-    const st = document.getElementById('vr-rec-status');
-    if (st) st.textContent = 'Listening… tap the speaker toggle as the conversation moves';
+    // Ask for the mic explicitly first — SpeechRecognition failures are silent otherwise
+    navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
+      stream.getTracks().forEach(t => t.stop());
+      startRecognition();
+    }).catch(err => {
+      const st = document.getElementById('vr-rec-status');
+      if (st) st.textContent = '❌ Microphone blocked';
+      toast('Microphone blocked. Click the 🔒 icon next to the address bar → allow Microphone → reload.', true);
+    });
   } else {
     voiceState.recording = false;
     try { voiceState.recognition.stop(); } catch (e) {}
@@ -1025,6 +1010,52 @@ function toggleDictation() {
     const st = document.getElementById('vr-rec-status');
     if (st) st.textContent = 'Stopped — review the transcript, then generate';
   }
+}
+
+function startRecognition() {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  voiceState.recognition = new SR();
+  voiceState.recognition.continuous = true;
+  voiceState.recognition.interimResults = true;
+  voiceState.recognition.lang = voiceState.lang || 'en-IN';
+  voiceState.recognition.onresult = (e) => {
+    let interim = '';
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      const t = e.results[i][0].transcript;
+      if (e.results[i].isFinal) {
+        voiceState.transcript = (voiceState.transcript ? voiceState.transcript + '\n' : '')
+          + `${voiceState.speaker}: ${t.trim()}`;
+      } else interim += t;
+    }
+    const ta = document.getElementById('vr-transcript');
+    if (ta) ta.value = (voiceState.transcript ? voiceState.transcript + '\n' : '') + (interim ? `[${voiceState.speaker}] ${interim}` : '');
+  };
+  voiceState.recognition.onerror = (e) => {
+    const st = document.getElementById('vr-rec-status');
+    const messages = {
+      'not-allowed': '❌ Mic permission denied — allow mic in the address-bar 🔒 menu, then reload',
+      'service-not-allowed': '❌ Speech service blocked in this browser — use Google Chrome',
+      'network': '❌ Speech service needs internet connectivity',
+      'no-speech': '…no speech detected yet — keep talking',
+      'audio-capture': '❌ No microphone found',
+    };
+    const msg = messages[e.error] || `❌ Dictation error: ${e.error}`;
+    if (st) st.textContent = msg;
+    if (['not-allowed', 'service-not-allowed', 'audio-capture'].includes(e.error)) {
+      voiceState.recording = false;
+      const btn = document.getElementById('btn-vr-record');
+      if (btn) { btn.textContent = '🎙 Start live dictation'; btn.classList.add('secondary'); }
+      toast(msg, true);
+    }
+  };
+  voiceState.recognition.onend = () => { if (voiceState.recording) try { voiceState.recognition.start(); } catch (e) {} };
+  voiceState.recognition.start();
+  voiceState.recording = true;
+  voiceState.speaker = 'Doctor';
+  const btn = document.getElementById('btn-vr-record');
+  if (btn) { btn.textContent = '⏹ Stop dictation'; btn.classList.remove('secondary'); }
+  const st = document.getElementById('vr-rec-status');
+  if (st) st.textContent = 'Listening… tap the speaker toggle as the conversation moves';
 }
 
 async function generateVoiceReport() {
