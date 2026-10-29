@@ -177,6 +177,7 @@ const NAV = {
     { id: 'appointments', label: 'My appointments' },
     { id: 'records', label: 'Medical records' },
     { id: 'documents', label: 'My documents' },
+    { id: 'reports', label: 'Medical reports' },
     { id: 'profile', label: 'My profile' },
   ],
   doctor: [
@@ -185,6 +186,7 @@ const NAV = {
     { id: 'patients', label: 'My patients' },
     { id: 'queue', label: 'Appointment requests' },
     { id: 'records', label: 'Patient records' },
+    { id: 'voice', label: 'Voice reports' },
   ],
   admin: [
     { id: 'overview', label: 'Overview' },
@@ -257,8 +259,8 @@ async function renderPage() {
   const content = document.getElementById('page-content');
   const title = document.getElementById('page-title');
   const map = {
-    'patient': { overview: [patientOverview, 'Your dashboard'], book: [bookAppointment, 'Book a consultation'], appointments: [patientAppointments, 'My appointments'], records: [patientRecords, 'Medical records'], documents: [patientDocuments, 'My documents'], profile: [patientProfile, 'My profile'] },
-    'doctor': { overview: [doctorOverview, 'Your dashboard'], schedule: [doctorSchedule, 'My schedule'], patients: [doctorPatients, 'My patients'], queue: [doctorQueue, 'Appointment requests'], records: [doctorRecords, 'Patient records'] },
+    'patient': { overview: [patientOverview, 'Your dashboard'], book: [bookAppointment, 'Book a consultation'], appointments: [patientAppointments, 'My appointments'], records: [patientRecords, 'Medical records'], documents: [patientDocuments, 'My documents'], reports: [patientVoiceReports, 'Medical reports'], profile: [patientProfile, 'My profile'] },
+    'doctor': { overview: [doctorOverview, 'Your dashboard'], schedule: [doctorSchedule, 'My schedule'], patients: [doctorPatients, 'My patients'], queue: [doctorQueue, 'Appointment requests'], records: [doctorRecords, 'Patient records'], voice: [doctorVoiceReports, 'Voice reports'] },
     'admin': { overview: [adminOverview, 'Hospital overview'], doctors: [adminDoctors, 'Manage doctors'], patients: [adminPatients, 'Manage patients'], appointments: [adminAppointments, 'All appointments'] },
   };
   const entry = (map[state.role] || {})[state.page] || map[state.role].overview;
@@ -895,6 +897,306 @@ async function createMedicalRecord() {
     btn.disabled = false; btn.textContent = 'Save record →';
     toast(err.message || 'Save failed', true);
   }
+}
+
+/* ── voice-to-medical-report (Transcribe + Bedrock) ──────────────────────── */
+
+const voiceState = { patientId: '', recording: false, mediaRecorder: null, chunks: [], pollTimer: null, activeReportId: '' };
+
+function renderKeywords(k) {
+  if (!k) return '<p class="date">No extraction available yet.</p>';
+  const sym = (k.symptoms || []).map(s => `<span class="symptom-pill">${esc(s)}</span>`).join(' ') || '<span class="date">None stated</span>';
+  const rx = (k.prescriptions || []).map(p =>
+    `<div class="record-item" style="margin:6px 0"><b>${esc(p.drug || 'Medication')}</b> — ${esc(p.dose || 'standard dose')} · ${esc(p.frequency || 'as directed')}</div>`).join('')
+    || '<p class="date">No prescriptions dictated</p>';
+  const adv = (k.advice || []).map(a => `<li>${esc(a)}</li>`).join('');
+  return `
+    <div class="grid" style="grid-template-columns:1fr 1fr;gap:12px">
+      <section class="card" style="padding:14px"><small class="date">SYMPTOMS (verbatim)</small><div class="slots" style="margin-top:8px">${sym}</div></section>
+      <section class="card" style="padding:14px"><small class="date">DURATION / ONSET</small><p style="margin:8px 0 0"><b>${esc(k.duration || 'Not stated')}</b></p></section>
+      <section class="card" style="padding:14px"><small class="date">DOCTOR'S DIAGNOSIS</small><p style="margin:8px 0 0"><b>${esc(k.root_cause || 'Not explicitly diagnosed')}</b></p></section>
+      <section class="card" style="padding:14px"><small class="date">PRESCRIPTIONS</small>${rx}</section>
+    </div>
+    ${adv ? `<section class="card" style="padding:14px;margin-top:12px"><small class="date">DOCTOR'S ADVICE & NEXT STEPS</small><ul style="margin:8px 0 0">${adv}</ul></section>` : ''}`;
+}
+
+async function doctorVoiceReports() {
+  await Promise.all([loadAppointments(), loadDoctors().catch(() => [])]);
+  const patientIds = [...new Set(state.appointments.map(a => a.patientId))];
+  const names = {};
+  await Promise.all(patientIds.map(async pid => {
+    try { names[pid] = (await carelyApi(`/patients/${pid}`)).name; } catch (e) { names[pid] = null; }
+  }));
+  if (voiceState.patientId && !patientIds.includes(voiceState.patientId)) voiceState.patientId = '';
+  if (!voiceState.patientId && patientIds.length) voiceState.patientId = patientIds[0];
+
+  const res = await carelyApi('/voice-reports?limit=50').catch(() => ({ reports: [] }));
+  const reports = (res.reports || []).slice().sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+
+  const statusBadge = s => `<span class="badge ${s === 'approved' ? '' : s === 'error' ? 'alert' : 'gray'}">${esc(s)}</span>`;
+  return `
+    <section class="card">
+      <div class="section-head"><div><div class="eyebrow">Speak · Transcribe · Extract · Approve</div><h2>Voice reports</h2></div>
+        <span class="badge">Transcribe + Bedrock</span></div>
+      <p class="date">Speak the consultation aloud — the browser converts speech to text live, then Amazon Bedrock extracts a verbatim clinical structure and you approve the final report. AI only records what was said — it never invents a diagnosis.</p>
+      <div class="form">
+        <label>Patient
+          <select id="vr-patient" onchange="voiceState.patientId=this.value">
+            ${patientIds.map(pid => `<option value="${esc(pid)}" ${pid === voiceState.patientId ? 'selected' : ''}>${esc(names[pid] || `Patient ${pid.slice(0, 8)}`)}</option>`).join('')}
+          </select>
+        </label>
+        <div class="upload-row">
+          <button class="btn ${voiceState.recording ? '' : 'secondary'}" id="btn-vr-record" onclick="toggleDictation()">
+            ${voiceState.recording ? '⏹ Stop dictation' : '🎙 Start live dictation'}
+          </button>
+          <span class="badge" id="vr-speaker" onclick="toggleSpeaker()" style="cursor:pointer" title="Tap between speakers as the conversation moves">Speaking: Doctor ⇄</span>
+          <span id="vr-rec-status" class="date">${voiceState.recording ? 'Listening…' : 'Idle'}</span>
+        </div>
+        <label>Consultation transcript (edit freely before generating)
+          <textarea id="vr-transcript" rows="6" placeholder="Tap Start live dictation and speak. Prefix lines with Doctor: or Patient: — or tap the speaker toggle while dictating.">${esc(voiceState.transcript || '')}</textarea>
+        </label>
+        <button class="btn" id="btn-vr-gen" onclick="generateVoiceReport()">🧠 Generate AI medical report →</button>
+        <label>…or upload an audio file for Amazon Transcribe
+          <input type="file" id="vr-file" accept="audio/*,.wav,.mp3,.m4a,.webm,.ogg">
+        </label>
+        <button class="btn secondary" id="btn-vr-file" onclick="uploadVoiceFile()">Transcribe uploaded audio →</button>
+      </div>
+      <div class="section-head" style="margin-top:24px"><h2>My reports</h2><span class="badge">${reports.length}</span></div>
+      ${reports.length ? reports.map(r => {
+        const pname = names[r.patientId] || `Patient ${(r.patientId || '?').slice(0, 8)}`;
+        return `
+        <div class="record-item">
+          <div class="record-head"><div>
+            <b>${esc(r.audioFileName || 'Consultation audio')}</b> ${statusBadge(r.status)}
+            <p class="date">${esc(pname)} · ${fmtDateTime(r.createdAt)}${r.errorMessage ? ' · ' + esc(r.errorMessage) : ''}</p>
+          </div>
+          <div>
+            ${r.status === 'review' ? `<button class="btn" onclick="openVoiceReport('${esc(r.reportId)}')">Review & approve</button>` : ''}
+            <button class="link" onclick="openVoiceReport('${esc(r.reportId)}')">Open</button>
+          </div></div>
+        </div>`;
+      }).join('') : '<p class="date">No voice reports yet — record your first consultation above.</p>'}
+    </section>`;
+}
+
+/* ── live browser dictation (Web Speech API) ─────────────────────────────── */
+
+function toggleSpeaker() {
+  voiceState.speaker = voiceState.speaker === 'Patient' ? 'Doctor' : 'Patient';
+  const b = document.getElementById('vr-speaker');
+  if (b) b.textContent = `Speaking: ${voiceState.speaker} ⇄`;
+}
+
+function toggleDictation() {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) return toast('Live dictation needs Chrome/Edge. Use the audio upload instead.', true);
+  if (!voiceState.recording) {
+    voiceState.recognition = new SR();
+    voiceState.recognition.continuous = true;
+    voiceState.recognition.interimResults = true;
+    voiceState.recognition.lang = 'en-IN';
+    voiceState.recognition.onresult = (e) => {
+      let interim = '';
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const t = e.results[i][0].transcript;
+        if (e.results[i].isFinal) {
+          voiceState.transcript = (voiceState.transcript ? voiceState.transcript + '\n' : '')
+            + `${voiceState.speaker}: ${t.trim()}`;
+        } else interim += t;
+      }
+      const ta = document.getElementById('vr-transcript');
+      if (ta) ta.value = (voiceState.transcript ? voiceState.transcript + '\n' : '') + (interim ? `[${voiceState.speaker}] ${interim}` : '');
+    };
+    voiceState.recognition.onend = () => { if (voiceState.recording) try { voiceState.recognition.start(); } catch (e) {} };
+    voiceState.recognition.start();
+    voiceState.recording = true;
+    voiceState.speaker = 'Doctor';
+    const btn = document.getElementById('btn-vr-record');
+    if (btn) { btn.textContent = '⏹ Stop dictation'; btn.classList.remove('secondary'); }
+    const st = document.getElementById('vr-rec-status');
+    if (st) st.textContent = 'Listening… tap the speaker toggle as the conversation moves';
+  } else {
+    voiceState.recording = false;
+    try { voiceState.recognition.stop(); } catch (e) {}
+    const ta = document.getElementById('vr-transcript');
+    if (ta) voiceState.transcript = ta.value.trim();
+    const btn = document.getElementById('btn-vr-record');
+    if (btn) { btn.textContent = '🎙 Start live dictation'; btn.classList.add('secondary'); }
+    const st = document.getElementById('vr-rec-status');
+    if (st) st.textContent = 'Stopped — review the transcript, then generate';
+  }
+}
+
+async function generateVoiceReport() {
+  const ta = document.getElementById('vr-transcript');
+  const transcript = (ta ? ta.value : voiceState.transcript || '').trim();
+  if (!transcript) return toast('Dictate or type a consultation transcript first', true);
+  if (!voiceState.patientId) return toast('Select a patient first', true);
+  const btn = document.getElementById('btn-vr-gen');
+  btn.disabled = true; btn.textContent = 'Generating…';
+  try {
+    const res = await carelyApi('/voice-reports', {
+      method: 'POST', body: JSON.stringify({ patientId: voiceState.patientId, transcript }),
+    });
+    voiceState.transcript = '';
+    toast(res.status === 'review' ? 'AI report generated — review and approve.' : 'Report created.');
+    await openVoiceReport(res.reportId);
+    await rerenderPage();
+  } catch (err) {
+    toast(err.message || 'Report generation failed', true);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '🧠 Generate AI medical report →'; }
+  }
+}
+
+async function toggleVoiceRecording() {
+  if (!voiceState.recording) {
+    if (!voiceState.patientId) return toast('Select a patient first', true);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      voiceState.chunks = [];
+      voiceState.mediaRecorder = new MediaRecorder(stream);
+      voiceState.mediaRecorder.ondataavailable = e => { if (e.data.size) voiceState.chunks.push(e.data); };
+      voiceState.mediaRecorder.onstop = () => {
+        stream.getTracks().forEach(t => t.stop());
+        const blob = new Blob(voiceState.chunks, { type: voiceState.mediaRecorder.mimeType || 'audio/webm' });
+        submitVoiceAudio(blob, 'consultation-recording.webm');
+      };
+      voiceState.mediaRecorder.start();
+      voiceState.recording = true;
+      const btn = document.getElementById('btn-vr-record');
+      if (btn) { btn.textContent = '⏹ Stop recording'; btn.classList.remove('secondary'); }
+      const st = document.getElementById('vr-rec-status');
+      if (st) st.textContent = 'Recording… speak the consultation now';
+    } catch (err) {
+      toast('Microphone access denied: ' + err.message, true);
+    }
+  } else {
+    voiceState.recording = false;
+    const btn = document.getElementById('btn-vr-record');
+    if (btn) { btn.textContent = '🎙 Start recording'; btn.classList.add('secondary'); }
+    const st = document.getElementById('vr-rec-status');
+    if (st) st.textContent = 'Processing…';
+    if (voiceState.mediaRecorder && voiceState.mediaRecorder.state !== 'inactive') voiceState.mediaRecorder.stop();
+  }
+}
+
+async function uploadVoiceFile() {
+  const input = document.getElementById('vr-file');
+  const file = input && input.files && input.files[0];
+  if (!file) return toast('Choose an audio file first', true);
+  if (!voiceState.patientId) return toast('Select a patient first', true);
+  await submitVoiceAudio(file, file.name);
+}
+
+async function submitVoiceAudio(blob, fileName) {
+  try {
+    toast('Uploading audio…');
+    const ct = blob.type && blob.type.startsWith('audio') ? blob.type : 'audio/webm';
+    const { uploadUrl, fileKey } = await carelyApi('/voice-reports/upload-url', {
+      method: 'POST', body: JSON.stringify({ contentType: ct }),
+    });
+    const putTarget = window.CARELY_CONFIG.localMode
+      ? `${window.CARELY_CONFIG.apiUrl}/local-upload?fileKey=${encodeURIComponent(fileKey)}` : uploadUrl;
+    const headers = { 'Content-Type': ct };
+    if (window.CARELY_CONFIG.localMode) {
+      const session = await window.carelyAuth.getSession();
+      headers['Authorization'] = `Bearer ${window.carelyAuth.idToken(session)}`;
+    }
+    const put = await fetch(putTarget, { method: 'PUT', headers, body: blob });
+    if (!put.ok) throw new Error(`Audio upload failed (${put.status})`);
+    const res = await carelyApi('/voice-reports', {
+      method: 'POST', body: JSON.stringify({
+        patientId: voiceState.patientId, audioKey: fileKey, audioFileName: fileName }),
+    });
+    toast('Transcription started — this takes ~30–60 seconds.');
+    voiceState.activeReportId = res.reportId;
+    pollVoiceReport(res.reportId);
+    await rerenderPage();
+  } catch (err) {
+    toast(err.message || 'Voice report failed', true);
+  }
+}
+
+function pollVoiceReport(reportId) {
+  clearInterval(voiceState.pollTimer);
+  voiceState.pollTimer = setInterval(async () => {
+    try {
+      const { report } = await carelyApi(`/voice-reports/${reportId}`);
+      if (report.status !== 'transcribing') {
+        clearInterval(voiceState.pollTimer);
+        toast(report.status === 'review' ? 'Transcription + AI extraction complete — ready for your review!' :
+              report.status === 'error' ? `Report error: ${report.errorMessage}` : `Report ${report.status}`);
+        if (state.page === 'voice') await rerenderPage();
+      }
+    } catch (e) { /* transient — keep polling */ }
+  }, 6000);
+}
+
+async function openVoiceReport(reportId) {
+  try {
+    const { report } = await carelyApi(`/voice-reports/${reportId}`);
+    if (report.status === 'transcribing') {
+      toast('Still transcribing — it will appear here shortly.');
+      pollVoiceReport(reportId);
+      return;
+    }
+    const isOwner = report.doctorId === state.claims.sub;
+    const decided = report.status === 'approved' || report.status === 'rejected';
+    const overlay = document.createElement('div');
+    overlay.id = 'vr-modal';
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(16,47,73,.55);z-index:60;display:grid;place-items:center;padding:20px';
+    overlay.innerHTML = `
+      <div style="background:#fff;border-radius:18px;max-width:860px;width:100%;max-height:88vh;overflow:auto;padding:26px">
+        <div class="section-head"><div><div class="eyebrow">Voice-to-medical-report</div>
+          <h2>${esc(report.audioFileName || 'Consultation')}</h2>
+          <span class="badge">${esc(report.status)}</span></div>
+          <button class="link" onclick="document.getElementById('vr-modal').remove()">Close ✕</button></div>
+        ${report.transcript ? `<small class="date">TRANSCRIPT (speaker-labelled by Amazon Transcribe)</small>
+          <div class="record-notes" style="white-space:pre-wrap">${esc(report.transcript)}</div>` : ''}
+        <div style="margin-top:16px">${renderKeywords(report.structured)}</div>
+        ${report.errorMessage ? `<div class="alert notice" style="margin-top:12px">${esc(report.errorMessage)}</div>` : ''}
+        <div class="notice" style="margin-top:14px">🔒 Verbatim extraction only — every field traces to spoken words. You are the doctor: review before approving.</div>
+        ${isOwner && report.status === 'review' ? `
+          <div style="display:flex;gap:12px;margin-top:14px">
+            <button class="btn" onclick="decideVoiceReport('${esc(report.reportId)}','approved')">✓ Approve report</button>
+            <button class="link" onclick="decideVoiceReport('${esc(report.reportId)}','rejected')">Reject</button>
+          </div>` : decided ? `<p class="date" style="margin-top:12px">Decision: <b>${esc(report.status)}</b> ${report.approvedAt ? '· ' + fmtDateTime(report.approvedAt) : ''}</p>` : ''}
+      </div>`;
+    document.body.appendChild(overlay);
+  } catch (err) {
+    toast(err.message || 'Could not open report', true);
+  }
+}
+
+async function decideVoiceReport(reportId, decision) {
+  try {
+    await carelyApi(`/voice-reports/${reportId}/approval`, { method: 'PUT', body: JSON.stringify({ decision }) });
+    toast(decision === 'approved' ? 'Report approved — now visible to the patient.' : 'Report rejected.');
+    document.getElementById('vr-modal')?.remove();
+    await rerenderPage();
+  } catch (err) {
+    toast(err.message || 'Decision failed', true);
+  }
+}
+
+async function patientVoiceReports() {
+  const res = await carelyApi('/voice-reports?limit=50').catch(() => ({ reports: [] }));
+  const reports = (res.reports || []).slice().sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+  return `
+    <section class="card">
+      <div class="section-head"><div><div class="eyebrow">Approved by your doctor</div><h2>Medical reports</h2></div>
+        <span class="badge">${reports.length}</span></div>
+      ${reports.length ? reports.map(r => `
+        <div class="record-item">
+          <div class="record-head"><div>
+            <b>${esc(r.audioFileName || 'Consultation report')}</b>
+            <p class="date">${fmtDateTime(r.approvedAt || r.createdAt)} · approved</p>
+          </div>
+          <button class="btn secondary" onclick="openVoiceReport('${esc(r.reportId)}')">Open report</button></div>
+        </div>`).join('') : '<p class="date">No approved reports yet. Reports appear here after your doctor reviews and approves them.</p>'}
+      <div class="notice">🔒 Reports are generated from your consultations and approved by your doctor before you can see them.</div>
+    </section>`;
 }
 
 /* ── admin screens ───────────────────────────────────────────────────────── */

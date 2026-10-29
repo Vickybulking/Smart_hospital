@@ -18,3 +18,4 @@ a{color:#168f82}
 .record-notes{background:var(--mint);border-radius:9px;padding:10px 13px;margin:10px 0 2px;color:#175f57;white-space:pre-wrap}
 .upload-row{display:flex;gap:12px;align-items:center;margin:14px 0}
 textarea{border:1px solid var(--line);border-radius:9px;padding:12px;color:var(--ink);font:inherit;resize:vertical}
+.symptom-pill{background:var(--mint);color:#148e81;padding:6px 12px;border-radius:16px;font-weight:600;font-size:13px;display:inline-block;margin:3px}

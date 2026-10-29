@@ -174,6 +174,18 @@ Resources:
         - AttributeName: documentId
           KeyType: HASH
 
+  VoiceReportsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub ${EnvironmentName}-carely-voice-reports
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: reportId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: reportId
+          KeyType: HASH
+
   # ── API Gateway (Cognito-authorised REST API) ──────────────────────────────
   HospitalApi:
     Type: AWS::Serverless::Api
@@ -693,6 +705,125 @@ Resources:
             RestApiId: !Ref HospitalApi
             Path: /notifications
             Method: post
+
+  # ── Voice-to-Medical-Report (Transcribe + Bedrock) ──────────────────────────
+  VoiceUploadUrlFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: functions.voice_reports.upload_url.handler.handler
+      Environment:
+        Variables:
+          DOCUMENTS_BUCKET: !Ref DocumentsBucket
+      Policies:
+        - S3WritePolicy:
+            BucketName: !Ref DocumentsBucket
+      Events:
+        VoiceUploadUrl:
+          Type: Api
+          Properties:
+            RestApiId: !Ref HospitalApi
+            Path: /voice-reports/upload-url
+            Method: post
+
+  CreateVoiceReportFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: functions.voice_reports.create.handler.handler
+      Timeout: 30
+      Environment:
+        Variables:
+          VOICE_REPORTS_TABLE: !Ref VoiceReportsTable
+          DOCUMENTS_BUCKET: !Ref DocumentsBucket
+          TRANSCRIBE_LANGUAGE: en-IN
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref VoiceReportsTable
+        - S3ReadPolicy:
+            BucketName: !Ref DocumentsBucket
+        - Statement:
+            - Effect: Allow
+              Action:
+                - transcribe:StartTranscriptionJob
+                - transcribe:GetTranscriptionJob
+              Resource: '*'
+      Events:
+        CreateVoiceReport:
+          Type: Api
+          Properties:
+            RestApiId: !Ref HospitalApi
+            Path: /voice-reports
+            Method: post
+
+  GetVoiceReportFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: functions.voice_reports.get.handler.handler
+      Timeout: 60
+      MemorySize: 512
+      Environment:
+        Variables:
+          VOICE_REPORTS_TABLE: !Ref VoiceReportsTable
+          DOCUMENTS_BUCKET: !Ref DocumentsBucket
+          BEDROCK_MODEL_ID: apac.amazon.nova-lite-v1:0
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref VoiceReportsTable
+        - S3ReadPolicy:
+            BucketName: !Ref DocumentsBucket
+        - Statement:
+            - Effect: Allow
+              Action:
+                - transcribe:GetTranscriptionJob
+              Resource: '*'
+            - Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+              Resource:
+                - !Sub 'arn:${AWS::Partition}:bedrock:*:*:foundation-model/amazon.nova-*'
+                - !Sub 'arn:${AWS::Partition}:bedrock:*:*:inference-profile/apac.*'
+      Events:
+        GetVoiceReport:
+          Type: Api
+          Properties:
+            RestApiId: !Ref HospitalApi
+            Path: /voice-reports/{reportId}
+            Method: get
+
+  ListVoiceReportsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: functions.voice_reports.list.handler.handler
+      Environment:
+        Variables:
+          VOICE_REPORTS_TABLE: !Ref VoiceReportsTable
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref VoiceReportsTable
+      Events:
+        ListVoiceReports:
+          Type: Api
+          Properties:
+            RestApiId: !Ref HospitalApi
+            Path: /voice-reports
+            Method: get
+
+  ApproveVoiceReportFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: functions.voice_reports.approve.handler.handler
+      Environment:
+        Variables:
+          VOICE_REPORTS_TABLE: !Ref VoiceReportsTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref VoiceReportsTable
+      Events:
+        ApproveVoiceReport:
+          Type: Api
+          Properties:
+            RestApiId: !Ref HospitalApi
+            Path: /voice-reports/{reportId}/approval
+            Method: put
 
   # ── AI Summary (Bedrock) ────────────────────────────────────────────────────
   AiSummaryFunction:
