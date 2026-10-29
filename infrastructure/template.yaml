@@ -15,11 +15,6 @@ Globals:
     CodeUri: ../backend
     Architectures:
       - arm64
-  Api:
-    Cors:
-      AllowMethods: "'GET,POST,PUT,DELETE,OPTIONS'"
-      AllowHeaders: "'Content-Type,Authorization'"
-      AllowOrigin: "'*'"
 
 Parameters:
   EnvironmentName:
@@ -35,7 +30,7 @@ Resources:
       UserPoolName: !Sub ${EnvironmentName}-carely-user-pool
       AutoVerifiedAttributes: ['email']
       UsernameAttributes: ['email']
-      MfaConfiguration: OFF
+      MfaConfiguration: "OFF"
       Schema:
         - Name: email
           AttributeDataType: String
@@ -94,7 +89,9 @@ Resources:
         - Statement:
             - Effect: Allow
               Action: cognito-idp:AdminAddUserToGroup
-              Resource: !GetAtt CognitoUserPool.Arn
+              # Wildcard pool ARN (account/region scoped) — referencing the pool
+              # directly would create a circular dependency with LambdaConfig.
+              Resource: !Sub 'arn:${AWS::Partition}:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/*'
 
   PostConfirmationInvocationPermission:
     Type: AWS::Lambda::Permission
@@ -187,16 +184,22 @@ Resources:
         Authorizers:
           CognitoAuthorizer:
             UserPoolArn: !GetAtt CognitoUserPool.Arn
+      # Cors must live HERE (not Globals.Api) — Globals-level Cors is ignored
+      # when function events declare an explicit RestApiId, which left the
+      # OPTIONS preflight behind the Cognito authorizer (401 on browsers).
+      Cors:
+        AllowMethods: "'GET,POST,PUT,DELETE,OPTIONS'"
+        AllowHeaders: "'Content-Type,Authorization'"
+        AllowOrigin: "'*'"
 
   # ── S3 / SNS ────────────────────────────────────────────────────────────────
   DocumentsBucket:
     Type: AWS::S3::Bucket
     Properties:
       BucketName: !Sub ${AWS::AccountId}-${EnvironmentName}-carely-documents
-      ServerSideEncryptionConfiguration:
-        Rule:
-          ApplyServerSideEncryptionByDefault:
-            SSEAlgorithm: AES256
+      # Note: explicit ServerSideEncryptionConfiguration is omitted — all new S3
+      # buckets get SSE-S3 (AES256) encryption by default, and the account's
+      # CloudFormation early-validation hook rejects the property block.
       PublicAccessBlockConfiguration:
         BlockPublicAcls: true
         BlockPublicPolicy: true

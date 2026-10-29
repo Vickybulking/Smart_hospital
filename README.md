@@ -29,7 +29,7 @@ Prerequisites: AWS CLI + SAM CLI installed and authenticated, Python 3.10+.
 ```bash
 sam build --template infrastructure/template.yaml
 sam deploy --template .aws-sam/build/template.yaml \
-  --stack-name carely-dev --region ap-south-1 \
+  --stack-name carely-dev --region ap-southeast-2 \
   --capabilities CAPABILITY_IAM --resolve-s3 --no-confirm-changeset \
   --parameter-overrides EnvironmentName=development
 
