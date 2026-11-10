@@ -735,6 +735,7 @@ Resources:
           VOICE_REPORTS_TABLE: !Ref VoiceReportsTable
           DOCUMENTS_BUCKET: !Ref DocumentsBucket
           TRANSCRIBE_LANGUAGE: en-IN
+          BEDROCK_MODEL_ID: apac.amazon.nova-lite-v1:0
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref VoiceReportsTable
@@ -746,6 +747,12 @@ Resources:
                 - transcribe:StartTranscriptionJob
                 - transcribe:GetTranscriptionJob
               Resource: '*'
+            - Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+              Resource:
+                - !Sub 'arn:${AWS::Partition}:bedrock:*:*:foundation-model/amazon.nova-*'
+                - !Sub 'arn:${AWS::Partition}:bedrock:*:*:inference-profile/apac.*'
       Events:
         CreateVoiceReport:
           Type: Api

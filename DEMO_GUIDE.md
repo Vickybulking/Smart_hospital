@@ -46,9 +46,11 @@ If this file is ever missing, create `frontend/config.js` with exactly that cont
 ```bash
 cd /Users/vickybulking/.zcode/workspace/81f5f970-51f8-4a8f-a612-89e4a1c875a5/Smart_hospital
 python3 -m http.server 8080 --directory frontend
+python3 scripts/whisper_server.py        # second terminal — local Whisper STT for voice reports
 ```
 
-You should see: `Serving HTTP on 0.0.0.0 port 8080`. **Leave this terminal open.**
+You should see: `Serving HTTP on 0.0.0.0 port 8080` and `Carely Whisper STT service on
+http://127.0.0.1:5200`. **Leave both terminals open.**
 
 Then open **Google Chrome** → http://localhost:8080
 
@@ -83,10 +85,10 @@ only works in Chrome.
 
 ### Part C — Voice reports ⭐ (the unique feature)
 8. Still as Maya → **Voice reports** → patient Priya
-9. **🎙 Start live dictation** → allow mic if asked → speak the script (Section 6),
-   tapping **"Next line: Doctor ⇄"** between speakers
-10. **🧠 Generate AI medical report** → the structured report appears:
-    symptoms, duration, diagnosis, prescriptions, advice
+9. **🎙 Record consultation** → speak the script (Section 6) → **⏹ Stop & transcribe**
+   — the local Whisper engine transcribes it in a few seconds
+10. Review the transcript (edit labels if needed) → **🧠 Generate AI medical report** →
+    the structured report appears: symptoms, duration, diagnosis, prescriptions, advice
 11. Review it → **✓ Approve report**
 
 ### Part D — Patient sees everything (Priya)
@@ -125,7 +127,8 @@ box is editable — fix any word before generating.
 | Sidebar missing "Voice reports" | Stale cache → **Cmd+Shift+R** (hard refresh) |
 | Dashboard says "Failed to fetch" | CloudFront cached an old error → wait 2 min, reload. Fresh paths work immediately. |
 | "❌ Microphone blocked" | Click the 🔒 in Chrome's address bar → Microphone → Allow → reload |
-| "❌ Speech service needs internet" | Google's speech endpoint blocked on this network → switch to **phone hotspot**, or just type the transcript instead |
+| "Whisper failed / unreachable" | The whisper server isn't running → repeat the second command in Section 3 |
+| Transcription quality off | Speak clearly; the transcript box is editable before generating |
 | Dictation lines repeat twice | Fixed in current code — hard refresh. Old lines can also be deleted by hand in the transcript box |
 | Booking says "slot already booked" | That's the anti-double-booking feature — pick a different slot |
 | Login says wrong password | Check the table above (patient vs doctor passwords differ) |
@@ -133,8 +136,9 @@ box is editable — fix any word before generating.
 | Page completely blank | Server died → repeat Section 3 |
 
 **The unbreakable fallback:** if live dictation fails on stage, **type or paste**
-the dialogue from Section 6 into the transcript box (prefix lines `Doctor:` /
-`Patient:`) → Generate → identical report through the identical pipeline.
+the dialogue from Section 6 into the transcript box → Generate → identical report
+through the identical pipeline. The whisper transcription itself runs offline on this
+machine (whisper.cpp + the OpenAI Whisper small model) — no internet needed.
 
 ---
 

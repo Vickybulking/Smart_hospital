@@ -938,7 +938,7 @@ async function doctorVoiceReports() {
     <section class="card">
       <div class="section-head"><div><div class="eyebrow">Speak · Transcribe · Extract · Approve</div><h2>Voice reports</h2></div>
         <span class="badge">Transcribe + Bedrock</span></div>
-      <p class="date">Speak the consultation aloud — the browser converts speech to text live, then Amazon Bedrock extracts a verbatim clinical structure and you approve the final report. AI only records what was said — it never invents a diagnosis.</p>
+      <p class="date">Record the consultation with your microphone — it is transcribed locally by the open-source OpenAI Whisper engine (whisper.cpp, offline, no browser dependency), then Amazon Bedrock extracts a verbatim clinical structure and you approve the final report. AI only records what was said — it never invents a diagnosis.</p>
       <div class="form">
         <label>Patient
           <select id="vr-patient" onchange="voiceState.patientId=this.value">
@@ -946,20 +946,19 @@ async function doctorVoiceReports() {
           </select>
         </label>
         <div class="upload-row">
-          <button class="btn ${voiceState.recording ? '' : 'secondary'}" id="btn-vr-record" onclick="toggleDictation()">
-            ${voiceState.recording ? '⏹ Stop dictation' : '🎙 Start live dictation'}
+          <button class="btn ${voiceState.recording ? '' : 'secondary'}" id="btn-vr-record" onclick="toggleMicRecording()">
+            ${voiceState.recording ? '⏹ Stop & transcribe' : '🎙 Record consultation'}
           </button>
-          <span class="badge" id="vr-speaker" onclick="toggleSpeaker()" style="cursor:pointer" title="Tap BETWEEN lines: the label applies to the next line you speak">Next line: Doctor ⇄</span>
-          <span id="vr-rec-status" class="date">${voiceState.recording ? 'Listening…' : 'Idle'}</span>
+          <span id="vr-rec-status" class="date">${voiceState.recording ? 'Recording… speak the consultation' : 'Idle — local Whisper speech-to-text'}</span>
         </div>
         <label>Consultation transcript (edit freely before generating)
           <textarea id="vr-transcript" rows="6" placeholder="Tap Start live dictation and speak. Prefix lines with Doctor: or Patient: — or tap the speaker toggle while dictating.">${esc(voiceState.transcript || '')}</textarea>
         </label>
         <button class="btn" id="btn-vr-gen" onclick="generateVoiceReport()">🧠 Generate AI medical report →</button>
-        <label>…or upload an audio file for Amazon Transcribe
+        <label>…or transcribe an audio file (local Whisper)
           <input type="file" id="vr-file" accept="audio/*,.wav,.mp3,.m4a,.webm,.ogg">
         </label>
-        <button class="btn secondary" id="btn-vr-file" onclick="uploadVoiceFile()">Transcribe uploaded audio →</button>
+        <button class="btn secondary" id="btn-vr-file" onclick="transcribeVoiceFile()">Transcribe audio file →</button>
       </div>
       <div class="section-head" style="margin-top:24px"><h2>My reports</h2><span class="badge">${reports.length}</span></div>
       ${reports.length ? reports.map(r => {
@@ -979,117 +978,13 @@ async function doctorVoiceReports() {
     </section>`;
 }
 
-/* ── live browser dictation (Web Speech API) ─────────────────────────────── */
+/* ── local Whisper speech-to-text (whisper.cpp — open source, offline) ───── */
 
-function toggleSpeaker() {
-  voiceState.speaker = voiceState.speaker === 'Patient' ? 'Doctor' : 'Patient';
-  const b = document.getElementById('vr-speaker');
-  if (b) b.textContent = `Next line: ${voiceState.speaker} ⇄`;
+function whisperUrl() {
+  return (window.CARELY_CONFIG && window.CARELY_CONFIG.whisperUrl) || 'http://localhost:5200';
 }
 
-function toggleDictation() {
-  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!SR) return toast('Live dictation needs Chrome/Edge. Type the transcript instead — same pipeline.', true);
-  if (!voiceState.recording) {
-    // Ask for the mic explicitly first — SpeechRecognition failures are silent otherwise
-    navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
-      stream.getTracks().forEach(t => t.stop());
-      startRecognition();
-    }).catch(() => {
-      const st = document.getElementById('vr-rec-status');
-      if (st) st.textContent = '❌ Microphone blocked';
-      toast('Microphone blocked. Click the 🔒 icon next to the address bar → allow Microphone → reload.', true);
-    });
-  } else {
-    voiceState.recording = false;
-    try { voiceState.recognition.stop(); } catch (e) {}
-    const btn = document.getElementById('btn-vr-record');
-    if (btn) { btn.textContent = '🎙 Start live dictation'; btn.classList.add('secondary'); }
-    const st = document.getElementById('vr-rec-status');
-    if (st) st.textContent = 'Stopped — review the transcript, then generate';
-  }
-}
-
-function startRecognition() {
-  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  voiceState.recognition = new SR();
-  voiceState.recognition.continuous = true;
-  voiceState.recognition.interimResults = true;
-  voiceState.recognition.lang = voiceState.lang || 'en-IN';
-  const done = new Set();  // per-session dedupe: Chrome re-delivers finalized results
-
-  voiceState.recognition.onresult = (e) => {
-    let interim = '';
-    for (let i = 0; i < e.results.length; i++) {
-      const r = e.results[i];
-      const key = i + '|' + r[0].transcript;
-      if (r.isFinal && !done.has(key)) {
-        done.add(key);
-        // Label is fixed the moment the line is committed; tap the speaker
-        // toggle BETWEEN lines (after this line appears, before speaking).
-        const line = `${voiceState.speaker}: ${r[0].transcript.trim()}`;
-        const ta = document.getElementById('vr-transcript');
-        if (ta) ta.value = (ta.value ? ta.value + '\n' : '') + line;
-      } else if (!r.isFinal) {
-        interim += r[0].transcript;
-      }
-    }
-    const st = document.getElementById('vr-rec-status');
-    if (st) st.textContent = interim
-      ? `Hearing (${voiceState.speaker}): ${interim}`
-      : 'Listening… tap the toggle between speakers';
-  };
-  voiceState.recognition.onerror = (e) => {
-    const st = document.getElementById('vr-rec-status');
-    const messages = {
-      'not-allowed': '❌ Mic permission denied — allow mic in the address-bar 🔒 menu, then reload',
-      'service-not-allowed': '❌ Speech service blocked in this browser — use Google Chrome',
-      'network': '❌ Speech service needs internet connectivity',
-      'no-speech': '…no speech detected yet — keep talking',
-      'audio-capture': '❌ No microphone found',
-    };
-    const msg = messages[e.error] || `❌ Dictation error: ${e.error}`;
-    if (st) st.textContent = msg;
-    if (['not-allowed', 'service-not-allowed', 'audio-capture'].includes(e.error)) {
-      voiceState.recording = false;
-      const btn = document.getElementById('btn-vr-record');
-      if (btn) { btn.textContent = '🎙 Start live dictation'; btn.classList.add('secondary'); }
-      toast(msg, true);
-    }
-  };
-  voiceState.recognition.onend = () => { if (voiceState.recording) try { voiceState.recognition.start(); } catch (e) {} };
-  voiceState.recognition.start();
-  voiceState.recording = true;
-  voiceState.speaker = 'Doctor';
-  const btn = document.getElementById('btn-vr-record');
-  if (btn) { btn.textContent = '⏹ Stop dictation'; btn.classList.remove('secondary'); }
-  const st = document.getElementById('vr-rec-status');
-  if (st) st.textContent = 'Listening… tap the toggle between speakers';
-}
-
-async function generateVoiceReport() {
-  const ta = document.getElementById('vr-transcript');
-  const transcript = (ta ? ta.value : voiceState.transcript || '').trim();
-  if (!transcript) return toast('Dictate or type a consultation transcript first', true);
-  if (!voiceState.patientId) return toast('Select a patient first', true);
-  const btn = document.getElementById('btn-vr-gen');
-  btn.disabled = true; btn.textContent = 'Generating…';
-  try {
-    const res = await carelyApi('/voice-reports', {
-      method: 'POST', body: JSON.stringify({ patientId: voiceState.patientId, transcript }),
-    });
-    voiceState.transcript = '';
-    toast(res.status === 'review' ? 'AI report generated — review and approve.' : 'Report created.');
-    await openVoiceReport(res.reportId);
-    await rerenderPage();
-  } catch (err) {
-    toast(err.message || 'Report generation failed', true);
-  } finally {
-    if (btn) { btn.disabled = false; btn.textContent = '🧠 Generate AI medical report →'; }
-  }
-}
-
-async function toggleVoiceRecording() {
+async function toggleMicRecording() {
   if (!voiceState.recording) {
     if (!voiceState.patientId) return toast('Select a patient first', true);
     try {
@@ -1100,61 +995,79 @@ async function toggleVoiceRecording() {
       voiceState.mediaRecorder.onstop = () => {
         stream.getTracks().forEach(t => t.stop());
         const blob = new Blob(voiceState.chunks, { type: voiceState.mediaRecorder.mimeType || 'audio/webm' });
-        submitVoiceAudio(blob, 'consultation-recording.webm');
+        transcribeVoiceBlob(blob);
       };
       voiceState.mediaRecorder.start();
       voiceState.recording = true;
+      voiceState.recordStart = Date.now();
       const btn = document.getElementById('btn-vr-record');
-      if (btn) { btn.textContent = '⏹ Stop recording'; btn.classList.remove('secondary'); }
+      if (btn) { btn.textContent = '⏹ Stop & transcribe'; btn.classList.remove('secondary'); }
       const st = document.getElementById('vr-rec-status');
-      if (st) st.textContent = 'Recording… speak the consultation now';
+      if (st) {
+        st.textContent = 'Recording… 0s';
+        voiceState.recTimer = setInterval(() => {
+          st.textContent = `Recording… ${Math.round((Date.now() - voiceState.recordStart) / 1000)}s`;
+        }, 500);
+      }
     } catch (err) {
-      toast('Microphone access denied: ' + err.message, true);
+      const st = document.getElementById('vr-rec-status');
+      if (st) st.textContent = '❌ Microphone blocked';
+      toast('Microphone blocked. Allow mic for this site, then reload.', true);
     }
   } else {
     voiceState.recording = false;
+    clearInterval(voiceState.recTimer);
     const btn = document.getElementById('btn-vr-record');
-    if (btn) { btn.textContent = '🎙 Start recording'; btn.classList.add('secondary'); }
+    if (btn) { btn.textContent = '🎙 Record consultation'; btn.classList.add('secondary'); }
     const st = document.getElementById('vr-rec-status');
-    if (st) st.textContent = 'Processing…';
+    if (st) st.textContent = 'Transcribing locally (Whisper)…';
     if (voiceState.mediaRecorder && voiceState.mediaRecorder.state !== 'inactive') voiceState.mediaRecorder.stop();
   }
 }
 
-async function uploadVoiceFile() {
+async function transcribeVoiceBlob(blob) {
+  const st = document.getElementById('vr-rec-status');
+  try {
+    const put = await fetch(`${whisperUrl()}/transcribe`, {
+      method: 'POST',
+      headers: { 'Content-Type': blob.type || 'audio/webm' },
+      body: blob,
+    });
+    const data = await put.json();
+    if (!put.ok) throw new Error(data.error || `Whisper failed (${put.status})`);
+    const ta = document.getElementById('vr-transcript');
+    if (ta) ta.value = data.text;
+    voiceState.transcript = data.text;
+    if (st) st.textContent = `✓ Transcribed ${data.segments.length} segments in ${data.transcription_seconds}s (local Whisper)`;
+    toast('Transcription complete — review, then generate the AI report.');
+  } catch (err) {
+    if (st) st.textContent = '❌ ' + (err.message || 'Whisper service unreachable');
+    toast(`${err.message} — is scripts/whisper_server.py running? You can also type the transcript directly.`, true);
+  }
+}
+
+async function transcribeVoiceFile() {
   const input = document.getElementById('vr-file');
   const file = input && input.files && input.files[0];
   if (!file) return toast('Choose an audio file first', true);
-  if (!voiceState.patientId) return toast('Select a patient first', true);
-  await submitVoiceAudio(file, file.name);
-}
-
-async function submitVoiceAudio(blob, fileName) {
+  const st = document.getElementById('vr-rec-status');
+  if (st) st.textContent = 'Transcribing locally (Whisper)…';
   try {
-    toast('Uploading audio…');
-    const ct = blob.type && blob.type.startsWith('audio') ? blob.type : 'audio/webm';
-    const { uploadUrl, fileKey } = await carelyApi('/voice-reports/upload-url', {
-      method: 'POST', body: JSON.stringify({ contentType: ct }),
+    const put = await fetch(`${whisperUrl()}/transcribe`, {
+      method: 'POST',
+      headers: { 'Content-Type': file.type || 'audio/wav' },
+      body: file,
     });
-    const putTarget = window.CARELY_CONFIG.localMode
-      ? `${window.CARELY_CONFIG.apiUrl}/local-upload?fileKey=${encodeURIComponent(fileKey)}` : uploadUrl;
-    const headers = { 'Content-Type': ct };
-    if (window.CARELY_CONFIG.localMode) {
-      const session = await window.carelyAuth.getSession();
-      headers['Authorization'] = `Bearer ${window.carelyAuth.idToken(session)}`;
-    }
-    const put = await fetch(putTarget, { method: 'PUT', headers, body: blob });
-    if (!put.ok) throw new Error(`Audio upload failed (${put.status})`);
-    const res = await carelyApi('/voice-reports', {
-      method: 'POST', body: JSON.stringify({
-        patientId: voiceState.patientId, audioKey: fileKey, audioFileName: fileName }),
-    });
-    toast('Transcription started — this takes ~30–60 seconds.');
-    voiceState.activeReportId = res.reportId;
-    pollVoiceReport(res.reportId);
-    await rerenderPage();
+    const data = await put.json();
+    if (!put.ok) throw new Error(data.error || `Whisper failed (${put.status})`);
+    const ta = document.getElementById('vr-transcript');
+    if (ta) ta.value = data.text;
+    voiceState.transcript = data.text;
+    if (st) st.textContent = `✓ Transcribed in ${data.transcription_seconds}s (local Whisper)`;
+    toast('Transcription complete — review, then generate the AI report.');
   } catch (err) {
-    toast(err.message || 'Voice report failed', true);
+    if (st) st.textContent = '❌ ' + (err.message || 'Whisper service unreachable');
+    toast(`${err.message} — is scripts/whisper_server.py running?`, true);
   }
 }
 

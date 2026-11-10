@@ -22,6 +22,7 @@ window.CARELY_CONFIG = {
   region: '${REGION}',
   userPoolId: '${POOL_ID}',
   userPoolClientId: '${CLIENT_ID}',
+  whisperUrl: 'http://localhost:5200',
 };
 EOF
 

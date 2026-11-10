@@ -6,5 +6,6 @@ window.CARELY_CONFIG = {
   apiUrl: '',            // e.g. https://xxxx.execute-api.ap-south-1.amazonaws.com/development
   region: '',            // e.g. ap-south-1
   userPoolId: '',        // e.g. ap-south-1_XXXXXXX
+  whisperUrl: 'http://localhost:5200',
   userPoolClientId: '',  // app client id
 };

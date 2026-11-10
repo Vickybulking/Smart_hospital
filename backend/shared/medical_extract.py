@@ -166,9 +166,16 @@ _PRESCRIPTION_RE = re.compile(
 
 
 def rule_based_extract(dialogue: str) -> dict:
-    lines = [l.strip() for l in dialogue.split('\n') if ':' in l]
-    doctor_lines = [l.split(':', 1)[1].strip() for l in lines if l.lower().startswith('doctor')]
-    patient_lines = [l.split(':', 1)[1].strip() for l in lines if l.lower().startswith('patient')]
+    lines = [l.strip() for l in dialogue.split('\n') if l.strip()]
+    labeled = [l for l in lines if l.lower().startswith(('doctor:', 'patient:'))]
+    if labeled:
+        doctor_lines = [l.split(':', 1)[1].strip() for l in labeled if l.lower().startswith('doctor')]
+        patient_lines = [l.split(':', 1)[1].strip() for l in labeled if l.lower().startswith('patient')]
+    else:
+        # Unlabelled transcript (e.g. from local Whisper): scan every line for
+        # all cues — the doctor reviews and approves the result either way.
+        doctor_lines = lines
+        patient_lines = lines
     all_text = dialogue.lower()
 
     out = {'symptoms': [], 'duration': None, 'root_cause': None,
